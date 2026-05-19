@@ -1,9 +1,9 @@
 # backgroundassets coverage audit (vs MacOSX26.5.sdk)
 
-SDK_PUBLIC_FAMILIES: 15
-VERIFIED_FAMILIES: 12
+SDK_PUBLIC_FAMILIES: 18
+VERIFIED_FAMILIES: 15
 GAPS: 3
-COVERAGE_PCT: 80.00%
+COVERAGE_PCT: 83.33%
 
 Audit sources:
 
