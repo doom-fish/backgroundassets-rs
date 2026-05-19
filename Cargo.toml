@@ -1,0 +1,81 @@
+[package]
+name = "backgroundassets"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/doom-fish/backgroundassets-rs"
+repository = "https://github.com/doom-fish/backgroundassets-rs"
+description = "Safe Rust bindings for Apple's BackgroundAssets framework — on-demand asset packs delivered via App Store on macOS"
+authors = ["Per Johansson <per@doom.fish>"]
+keywords = ["backgroundassets", "assetpack", "apple", "macos"]
+categories = ["api-bindings", "os::macos-apis"]
+rust-version = "1.76"
+readme = "README.md"
+build = "build.rs"
+include = [
+    "src/**/*",
+    "swift-bridge/Package.swift",
+    "swift-bridge/Sources/**/*",
+    "examples/**/*",
+    "tests/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "COVERAGE.md",
+    "COVERAGE_AUDIT.md",
+    "LICENSE-*",
+]
+
+[lints.rust]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+[lib]
+name = "backgroundassets"
+crate-type = ["lib"]
+
+[features]
+default = []
+async = ["dep:doom-fish-utils"]
+
+[dependencies]
+doom-fish-utils = { path = "../doom-fish-utils", version = ">=0.3, <0.4", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+pollster = "0.3"
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "aarch64-apple-darwin"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[[test]]
+name = "asset_pack_smoke"
+path = "tests/asset_pack_smoke.rs"
+required-features = ["async"]
+
+[[example]]
+name = "01_list_pack_status"
+required-features = ["async"]
+
+[[example]]
+name = "02_download_pack"
+required-features = ["async"]
+
+[[example]]
+name = "03_extension_handler"
+required-features = ["async"]
+
+[profile.release]
+debug = "full"
+strip = "none"

@@ -1,0 +1,4 @@
+module BackgroundAssetsBridge {
+    header "BackgroundAssetsBridge.h"
+    export *
+}
