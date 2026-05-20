@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0] - 2026-05-20
+
+### Added
+
+- `async_api` module behind the `async` feature, providing executor-agnostic async/await wrappers for callback-based Background Assets APIs. Uses `doom-fish-utils::completion` so callers can use any executor (tokio, async-std, pollster, etc.).
+- New example `examples/04_async_download.rs` showing the async download flow.
+
 ## [0.1.1] - 2026-05-20
 
 - Clippy hygiene sweep: cleared all `-D warnings` lints across the crate. No public API change.

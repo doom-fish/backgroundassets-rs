@@ -64,6 +64,11 @@ impl AssetPackManager {
         (!ptr.is_null()).then_some(Self { ptr })
     }
 
+    #[cfg(feature = "async")]
+    pub(crate) const fn raw_ptr(&self) -> *mut c_void {
+        self.ptr
+    }
+
     pub fn asset_pack_is_available_locally(&self, asset_pack_id: &str) -> bool {
         ffi::required_cstring(asset_pack_id, "asset_pack_id").is_ok_and(|asset_pack_id| unsafe {
             ffi::ba_asset_pack_manager_asset_pack_is_available_locally(

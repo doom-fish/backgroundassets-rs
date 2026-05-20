@@ -15,6 +15,9 @@
 )]
 
 pub mod asset_pack;
+#[cfg(feature = "async")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
+pub mod async_api;
 pub mod download;
 pub mod error;
 pub mod extension;

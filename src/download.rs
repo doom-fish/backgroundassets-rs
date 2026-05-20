@@ -6,9 +6,9 @@ use std::ptr;
 
 #[cfg(feature = "async")]
 use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion};
+use serde::Serialize;
 #[cfg(feature = "async")]
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::Serialize;
 
 use crate::error::BackgroundAssetsError;
 use crate::ffi;
@@ -300,6 +300,11 @@ impl DownloadManager {
 
     fn from_raw(ptr: *mut c_void) -> Option<Self> {
         (!ptr.is_null()).then_some(Self { ptr })
+    }
+
+    #[cfg(feature = "async")]
+    pub(crate) const fn raw_ptr(&self) -> *mut c_void {
+        self.ptr
     }
 
     pub fn schedule_download(&self, download: &Download) -> Result<(), BackgroundAssetsError> {
