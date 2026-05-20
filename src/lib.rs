@@ -27,17 +27,31 @@ pub mod manifest;
 
 pub use asset_pack::{AssetPack, AssetPackSnapshot, AssetPackStatus};
 pub use download::{
-    ContentRequest, Download, DownloadManager, DownloadPriority, DownloadSnapshot, DownloadStatus,
-    UrlDownload, UrlDownloadOptions,
+    ContentRequest, Download, DownloadManager, DownloadManagerDelegate, DownloadManagerEvent,
+    DownloadPriority, DownloadSnapshot, DownloadStatus, DownloadWriteProgress, UrlDownload,
+    UrlDownloadOptions,
 };
-pub use error::BackgroundAssetsError;
+pub use error::{
+    BackgroundAssetsError, ManagedBackgroundAssetsError, ManagedBackgroundAssetsErrorCode,
+};
 #[cfg(feature = "async")]
-pub use extension::{install_global_downloader_extension, ExtensionEventStream};
+pub use download::{install_global_download_manager_delegate, DownloadManagerEventStream};
+#[cfg(feature = "async")]
+pub use extension::{
+    install_global_downloader_extension, install_global_managed_downloader_extension,
+    ExtensionEventStream, ManagedDownloaderExtensionConfiguration,
+    ManagedDownloaderExtensionRegistration,
+};
 pub use extension::{
     AppExtensionInfo, AppExtensionInfoSnapshot, AuthenticationChallenge, ChallengeDisposition,
     DownloaderExtensionHandler, ExtensionEvent,
 };
-pub use manager::AssetPackManager;
+pub use manager::{
+    AssetPackManager, ManagedAssetPackDownloadDelegate, ManagedAssetPackDownloadEvent,
+};
 #[cfg(feature = "async")]
-pub use manager::{DownloadProgress, DownloadStatusStream, DownloadStatusUpdate, UpdateCheck};
+pub use manager::{
+    install_global_managed_asset_pack_download_delegate, DownloadProgress,
+    DownloadStatusStream, DownloadStatusUpdate, ManagedAssetPackDownloadEventStream, UpdateCheck,
+};
 pub use manifest::Manifest;

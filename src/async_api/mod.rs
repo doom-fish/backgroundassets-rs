@@ -17,8 +17,12 @@
 //! | [`AsyncAssetPackManager::remove`] | `BAAssetPackManager.remove(assetPackWithID:)` |
 //! | [`AsyncDownloadManager::current_downloads`] | `BADownloadManager.fetchCurrentDownloads(...)` |
 //! | [`AsyncDownloadManager::with_exclusive_control`] | `BADownloadManager.withExclusiveControl(...)` |
+//! | [`install_global_download_manager_delegate`] | `BADownloadManager.delegate` |
+//! | [`install_global_managed_asset_pack_download_delegate`] | `BAAssetPackManager.delegate` |
+//! | [`install_global_managed_downloader_extension`] | `ManagedDownloaderExtension` |
 //!
-//! Multi-fire status updates continue to use [`DownloadStatusStream`].
+//! Multi-fire status updates continue to use [`DownloadStatusStream`],
+//! [`DownloadManagerEventStream`], and [`ManagedAssetPackDownloadEventStream`].
 //!
 //! ## Example
 //! ```no_run
@@ -52,8 +56,18 @@ use crate::download::{collect_downloads, Download, DownloadManager};
 use crate::error::BackgroundAssetsError;
 use crate::ffi;
 use crate::manager::AssetPackManager;
+pub use crate::download::{
+    install_global_download_manager_delegate, DownloadManagerDelegate, DownloadManagerEvent,
+    DownloadManagerEventStream, DownloadWriteProgress,
+};
+pub use crate::extension::{
+    install_global_managed_downloader_extension, ManagedDownloaderExtensionConfiguration,
+    ManagedDownloaderExtensionRegistration,
+};
 pub use crate::manager::{
-    DownloadProgress, DownloadStatusStream, DownloadStatusUpdate, UpdateCheck,
+    install_global_managed_asset_pack_download_delegate, DownloadProgress,
+    DownloadStatusStream, DownloadStatusUpdate, ManagedAssetPackDownloadDelegate,
+    ManagedAssetPackDownloadEvent, ManagedAssetPackDownloadEventStream, UpdateCheck,
 };
 
 struct OpaquePtr(*mut c_void);

@@ -3,7 +3,7 @@
 Audited against:
 
 - SDK: `MacOSX.sdk/System/Library/Frameworks/BackgroundAssets.framework`
-- Crate: `backgroundassets` v0.1.0
+- Crate: `backgroundassets` v0.3.0
 
 ## Managed asset packs
 
@@ -13,9 +13,10 @@ Audited against:
 | `AssetPack.Status` / `BAAssetPackStatus` | ✅ implemented | Exposed as `AssetPackStatus`. |
 | `AssetPackManager` / `BAAssetPackManager` | ✅ implemented | Shared manager, async discovery, status queries, update checks, file reads, removals, and status-update streams. |
 | `AssetPackManifest` / `BAAssetPackManifest` | ✅ implemented | Exposed as `Manifest`. |
-| `BAManagedErrorDomain` + `BAManagedErrorCode` | ✅ implemented | Preserved via `BackgroundAssetsError`. |
-| `BAManagedAssetPackDownloadDelegate` | ⏭️ deferred | Managed-download delegate callbacks are modeled through `AssetPackManager::status_updates*` instead of a direct delegate wrapper in 0.1.0. |
-| `BAManagedDownloaderExtension` / `ManagedDownloaderExtension` | ⏭️ deferred | The crate ships a generic `BADownloaderExtension` bridge today; the managed-extension refinements are documented in the audit as a future gap. |
+| `BAManagedErrorDomain` + `BAManagedErrorCode` | ✅ implemented | Preserved via `BackgroundAssetsError`, `ManagedBackgroundAssetsError`, and `ManagedBackgroundAssetsErrorCode`. |
+| `ManagedBackgroundAssetsError` | ✅ implemented | Typed Rust wrapper layered on the base error payload, preserving managed asset-pack identifiers and file paths. |
+| `BAManagedAssetPackDownloadDelegate` | ✅ implemented | Rust trait + installer helper `install_global_managed_asset_pack_download_delegate` + bounded async event stream. |
+| `BAManagedDownloaderExtension` / `ManagedDownloaderExtensionConfiguration` | ✅ implemented | Rust-managed installation surface plus Swift principal class `BackgroundAssetsRustManagedDownloaderExtension`. |
 
 ## Download model
 
@@ -27,7 +28,7 @@ Audited against:
 | `BADownload` | ✅ implemented | Metadata, essentiality, and `removing_essential`. |
 | `BAURLDownload` | ✅ implemented | Safe constructor plus option bundle for headers, method, essential flag, and priority. |
 | `BADownloadManager` | ✅ implemented | Shared manager, scheduling, cancellation, foreground start, exclusive control, and async current-download discovery. |
-| `BADownloadManagerDelegate` | ⏭️ deferred | Direct delegate callbacks are deferred in favor of the asset-pack status stream and extension event stream. |
+| `BADownloadManagerDelegate` | ✅ implemented | Rust trait + installer helper `install_global_download_manager_delegate` + bounded async event stream mirroring the delegate callbacks. |
 | `BAErrorDomain` + `BAErrorCode` | ✅ implemented | Preserved via `BackgroundAssetsError`. |
 
 ## Extension integration
@@ -36,8 +37,9 @@ Audited against:
 | --- | --- | --- |
 | `BAAppExtensionInfo` | ✅ implemented | Opaque wrapper plus snapshot API. |
 | `BADownloaderExtension` | ✅ implemented | Rust trait + global registration + Swift principal class `BackgroundAssetsRustDownloaderExtension`. |
+| `ManagedDownloaderExtension` | ✅ implemented | Managed install helper + Swift principal class `BackgroundAssetsRustManagedDownloaderExtension`. |
 | Challenge handling | ✅ implemented | Modeled through `AuthenticationChallenge` + `ChallengeDisposition`. |
 
 ## Summary
 
-The initial crate release focuses on the surfaces needed for managed asset packs, manifest parsing, URL download descriptors, and Rust-driven downloader extensions. Direct delegate protocols for `BADownloadManager` and the managed extension refinements remain documented gaps for a later release.
+The current release covers the full audited Background Assets surface for macOS 26.5, including direct delegate-property wrappers for download-manager and managed asset-pack callbacks, the self-hosted managed extension flow, and typed managed errors.

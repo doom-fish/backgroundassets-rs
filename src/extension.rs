@@ -11,6 +11,9 @@ use std::sync::{Mutex, OnceLock};
 use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream};
 use serde::{Deserialize, Serialize};
 
+use crate::asset_pack::AssetPackSnapshot;
+#[cfg(feature = "async")]
+use crate::download::{register_download_manager_delegate, DownloadManagerDelegate, DownloadManagerEventStream};
 use crate::download::{ContentRequest, Download, DownloadSnapshot};
 use crate::error::BackgroundAssetsError;
 use crate::ffi;
@@ -100,6 +103,10 @@ pub struct AuthenticationChallenge {
 }
 
 pub trait DownloaderExtensionHandler: Send + 'static {
+    fn should_download_asset_pack(&mut self, _asset_pack: &AssetPackSnapshot) -> bool {
+        true
+    }
+
     fn downloads(
         &mut self,
         request: ContentRequest,
@@ -125,6 +132,10 @@ pub trait DownloaderExtensionHandler: Send + 'static {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExtensionEvent {
+    ShouldDownloadAssetPack {
+        asset_pack: AssetPackSnapshot,
+        should_download: bool,
+    },
     DownloadsRequested {
         request: ContentRequest,
         manifest_url: String,
@@ -187,6 +198,78 @@ impl fmt::Debug for ExtensionEventStream {
 }
 
 #[cfg(feature = "async")]
+pub struct ManagedDownloaderExtensionConfiguration<D> {
+    download_manager_delegate: D,
+    extension_event_capacity: usize,
+    download_manager_event_capacity: usize,
+}
+
+#[cfg(feature = "async")]
+impl<D> ManagedDownloaderExtensionConfiguration<D> {
+    pub fn new(download_manager_delegate: D) -> Self {
+        Self {
+            download_manager_delegate,
+            extension_event_capacity: 16,
+            download_manager_event_capacity: 16,
+        }
+    }
+
+    pub fn extension_event_capacity(mut self, capacity: usize) -> Self {
+        self.extension_event_capacity = capacity.max(1);
+        self
+    }
+
+    pub fn download_manager_event_capacity(mut self, capacity: usize) -> Self {
+        self.download_manager_event_capacity = capacity.max(1);
+        self
+    }
+}
+
+#[cfg(feature = "async")]
+impl<D> fmt::Debug for ManagedDownloaderExtensionConfiguration<D> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManagedDownloaderExtensionConfiguration")
+            .field("extension_event_capacity", &self.extension_event_capacity)
+            .field(
+                "download_manager_event_capacity",
+                &self.download_manager_event_capacity,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "async")]
+pub struct ManagedDownloaderExtensionRegistration {
+    extension_events: ExtensionEventStream,
+    download_manager_events: DownloadManagerEventStream,
+}
+
+#[cfg(feature = "async")]
+impl ManagedDownloaderExtensionRegistration {
+    pub fn extension_events(&self) -> &ExtensionEventStream {
+        &self.extension_events
+    }
+
+    pub fn download_manager_events(&self) -> &DownloadManagerEventStream {
+        &self.download_manager_events
+    }
+
+    pub fn into_parts(self) -> (ExtensionEventStream, DownloadManagerEventStream) {
+        (self.extension_events, self.download_manager_events)
+    }
+}
+
+#[cfg(feature = "async")]
+impl fmt::Debug for ManagedDownloaderExtensionRegistration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManagedDownloaderExtensionRegistration")
+            .field("extension_events", &self.extension_events)
+            .field("download_manager_events", &self.download_manager_events)
+            .finish()
+    }
+}
+
+#[cfg(feature = "async")]
 struct ExtensionState {
     handler: Box<dyn DownloaderExtensionHandler>,
     sender: AsyncStreamSender<ExtensionEvent>,
@@ -214,6 +297,31 @@ where
 }
 
 #[cfg(feature = "async")]
+pub fn install_global_managed_downloader_extension<H, D>(
+    handler: H,
+    configuration: ManagedDownloaderExtensionConfiguration<D>,
+) -> ManagedDownloaderExtensionRegistration
+where
+    H: DownloaderExtensionHandler,
+    D: DownloadManagerDelegate,
+{
+    let ManagedDownloaderExtensionConfiguration {
+        download_manager_delegate,
+        extension_event_capacity,
+        download_manager_event_capacity,
+    } = configuration;
+
+    let extension_events = install_global_downloader_extension(handler, extension_event_capacity);
+    let download_manager_events =
+        register_download_manager_delegate(download_manager_delegate, download_manager_event_capacity);
+
+    ManagedDownloaderExtensionRegistration {
+        extension_events,
+        download_manager_events,
+    }
+}
+
+#[cfg(feature = "async")]
 fn string_from_ptr(ptr: *const c_char) -> String {
     if ptr.is_null() {
         String::new()
@@ -229,6 +337,62 @@ fn json_cstring<T: Serialize>(value: &T) -> *mut c_char {
         .ok()
         .and_then(|json| CString::new(json).ok())
         .map_or(ptr::null_mut(), CString::into_raw)
+}
+
+#[derive(Deserialize)]
+struct AssetPackSnapshotPayload {
+    id: String,
+    #[serde(rename = "downloadSize")]
+    download_size: i64,
+    version: i64,
+    description: String,
+}
+
+impl From<AssetPackSnapshotPayload> for AssetPackSnapshot {
+    fn from(value: AssetPackSnapshotPayload) -> Self {
+        Self {
+            id: value.id,
+            download_size: value.download_size,
+            version: value.version,
+            description: value.description,
+        }
+    }
+}
+
+fn asset_pack_snapshot_from_json(json: &str) -> Option<AssetPackSnapshot> {
+    serde_json::from_str::<AssetPackSnapshotPayload>(json)
+        .ok()
+        .map(Into::into)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ba_rust_extension_should_download_asset_pack(
+    asset_pack_json: *const c_char,
+) -> bool {
+    #[cfg(not(feature = "async"))]
+    {
+        let _ = asset_pack_json;
+        true
+    }
+
+    #[cfg(feature = "async")]
+    {
+        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json)) else {
+            return true;
+        };
+        let Ok(mut state_guard) = extension_state().lock() else {
+            return true;
+        };
+        let Some(state) = state_guard.as_mut() else {
+            return true;
+        };
+        let should_download = state.handler.should_download_asset_pack(&asset_pack);
+        state.sender.push(ExtensionEvent::ShouldDownloadAssetPack {
+            asset_pack,
+            should_download,
+        });
+        should_download
+    }
 }
 
 #[no_mangle]

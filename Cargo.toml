@@ -1,6 +1,6 @@
 [package]
 name = "backgroundassets"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/doom-fish/backgroundassets-rs"
@@ -78,6 +78,10 @@ required-features = ["async"]
 
 [[example]]
 name = "04_async_download"
+required-features = ["async"]
+
+[[example]]
+name = "05_managed_extension_handler"
 required-features = ["async"]
 
 [profile.release]

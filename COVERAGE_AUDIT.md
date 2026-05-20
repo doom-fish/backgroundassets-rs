@@ -1,9 +1,9 @@
 # backgroundassets coverage audit (vs MacOSX26.5.sdk)
 
 SDK_PUBLIC_FAMILIES: 18
-VERIFIED_FAMILIES: 15
-GAPS: 3
-COVERAGE_PCT: 83.33%
+VERIFIED_FAMILIES: 18
+GAPS: 0
+COVERAGE_PCT: 100.00%
 
 Audit sources:
 
@@ -20,6 +20,7 @@ Audit sources:
 | `BADownload` | `Download` |
 | `BAURLDownload` | `UrlDownload` |
 | `BADownloadManager` core operations | `DownloadManager` |
+| `BADownloadManagerDelegate` | `DownloadManagerDelegate`, `DownloadManagerEvent`, `DownloadManagerEventStream`, `install_global_download_manager_delegate` |
 | `BAAppExtensionInfo` | `AppExtensionInfo` + `AppExtensionInfoSnapshot` |
 | `BADownloaderExtension` | `DownloaderExtensionHandler`, `install_global_downloader_extension`, `BackgroundAssetsRustDownloaderExtension` |
 | `BAErrorDomain` + `BAErrorCode` | `BackgroundAssetsError` |
@@ -27,13 +28,11 @@ Audit sources:
 | `AssetPack.Status` / `BAAssetPackStatus` | `AssetPackStatus` |
 | `AssetPackManager` / `BAAssetPackManager` | `AssetPackManager`, `DownloadStatusUpdate`, `DownloadStatusStream`, `UpdateCheck` |
 | `AssetPackManifest` / `BAAssetPackManifest` | `Manifest` |
-| `BAManagedErrorDomain` + `BAManagedErrorCode` | `BackgroundAssetsError` |
+| `BAManagedAssetPackDownloadDelegate` | `ManagedAssetPackDownloadDelegate`, `ManagedAssetPackDownloadEventStream`, `install_global_managed_asset_pack_download_delegate` |
+| `BAManagedErrorDomain` + `BAManagedErrorCode` | `BackgroundAssetsError`, `ManagedBackgroundAssetsError`, `ManagedBackgroundAssetsErrorCode` |
+| `ManagedDownloaderExtension`, `ManagedDownloaderExtensionConfiguration`, `ManagedBackgroundAssetsError` | `install_global_managed_downloader_extension`, `ManagedDownloaderExtensionConfiguration`, `ManagedDownloaderExtensionRegistration`, `BackgroundAssetsRustManagedDownloaderExtension`, `ManagedBackgroundAssetsError` |
 | Managed asset-pack availability stream | `AssetPackManager::status_updates`, `status_updates_for_asset_pack` |
 
-## 🔴 GAPS
+## ✅ GAPS
 
-| Apple symbol family | Reason | Planned follow-up |
-| --- | --- | --- |
-| `BADownloadManagerDelegate` | The crate does not expose the Objective-C delegate protocol directly in 0.1.0. | Add a Rust event bridge for manual URL-download progress callbacks. |
-| `BAManagedAssetPackDownloadDelegate` | Managed progress is exposed through `AssetPackManager` status streams instead of a delegate wrapper. | Add a direct delegate wrapper if consumers need the exact delegate object model. |
-| `BAManagedDownloaderExtension`, `ManagedDownloaderExtensionConfiguration`, `ManagedBackgroundAssetsError` | The initial release ships a generic `BADownloaderExtension` bridge but not the managed-extension refinements. | Add a managed-extension registration layer and typed managed error helpers. |
+No remaining audited gaps for the macOS 26.5 Background Assets surface.

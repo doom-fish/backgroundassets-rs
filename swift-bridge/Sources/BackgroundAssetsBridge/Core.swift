@@ -231,12 +231,40 @@ func bridgeJSON<T: Encodable>(_ value: T) throws -> String {
 }
 
 func errorPayload(_ error: any Error) -> BridgeErrorPayload {
+    if #available(macOS 26.0, *), let managedError = error as? ManagedBackgroundAssetsError {
+        let nsError = managedError as NSError
+        switch managedError {
+        case let .assetPackNotFound(withID: assetPackID):
+            return BridgeErrorPayload(
+                domain: nsError.domain,
+                code: nsError.code,
+                message: nsError.localizedDescription,
+                assetPackID: assetPackID,
+                filePath: nil
+            )
+        case let .fileNotFound(at: filePath):
+            return BridgeErrorPayload(
+                domain: nsError.domain,
+                code: nsError.code,
+                message: nsError.localizedDescription,
+                assetPackID: nil,
+                filePath: String(describing: filePath)
+            )
+        @unknown default:
+            break
+        }
+    }
+
     let nsError = error as NSError
+    let assetPackID =
+        (nsError.userInfo["BAAssetPackIdentifierErrorKey"] as? String)
+        ?? (nsError.userInfo["assetPackID"] as? String)
+        ?? (nsError.userInfo["assetPackIdentifier"] as? String)
     return BridgeErrorPayload(
         domain: nsError.domain,
         code: nsError.code,
         message: nsError.localizedDescription,
-        assetPackID: nil,
+        assetPackID: assetPackID,
         filePath: nsError.userInfo[NSFilePathErrorKey] as? String
     )
 }

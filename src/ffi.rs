@@ -85,6 +85,10 @@ extern "C" {
         error_out: *mut *mut c_char,
     ) -> bool;
     #[cfg(feature = "async")]
+    pub fn ba_download_manager_delegate_install() -> *mut c_void;
+    #[cfg(feature = "async")]
+    pub fn ba_download_manager_delegate_clear_if_matches(delegate_ptr: *mut c_void);
+    #[cfg(feature = "async")]
     pub fn ba_download_manager_fetch_current_downloads_async(
         manager_ptr: *mut c_void,
         ctx: *mut c_void,
@@ -124,6 +128,10 @@ extern "C" {
         raw_path: *const c_char,
         error_out: *mut *mut c_char,
     ) -> *mut c_char;
+    #[cfg(feature = "async")]
+    pub fn ba_asset_pack_manager_delegate_install() -> *mut c_void;
+    #[cfg(feature = "async")]
+    pub fn ba_asset_pack_manager_delegate_clear_if_matches(delegate_ptr: *mut c_void);
     #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_all_asset_packs_async(
         ptr: *mut c_void,

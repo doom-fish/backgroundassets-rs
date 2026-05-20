@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0] - 2026-05-20
+
+### Added
+
+- Added direct `BADownloadManagerDelegate` coverage with the `DownloadManagerDelegate` Rust trait, `DownloadManagerEvent` stream, and `install_global_download_manager_delegate` helper.
+- Added direct `BAManagedAssetPackDownloadDelegate` coverage with the `ManagedAssetPackDownloadDelegate` Rust trait, matching async event stream, and installer helper.
+- Added self-hosted managed-extension support through `DownloaderExtensionHandler::should_download_asset_pack`, `ManagedDownloaderExtensionConfiguration`, `install_global_managed_downloader_extension`, and the Swift principal class `BackgroundAssetsRustManagedDownloaderExtension`.
+- Added typed `ManagedBackgroundAssetsError` and `ManagedBackgroundAssetsErrorCode` wrappers on top of `BackgroundAssetsError`, preserving managed asset-pack identifiers and file paths.
+- Added `examples/05_managed_extension_handler.rs` plus non-runtime tests covering the new public async/event surfaces.
+
+### Notes
+
+- Phase 32 completeness + async sweep.
+
 ## [0.2.0] - 2026-05-20
 
 ### Added
