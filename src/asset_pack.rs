@@ -82,6 +82,7 @@ impl AssetPack {
         (!ptr.is_null()).then_some(Self { ptr })
     }
 
+    #[cfg(feature = "async")]
     pub(crate) const fn raw_ptr(&self) -> *mut c_void {
         self.ptr
     }

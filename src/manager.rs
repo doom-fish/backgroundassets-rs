@@ -9,7 +9,9 @@ use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion};
 #[cfg(feature = "async")]
 use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream};
 
-use crate::asset_pack::{collect_asset_packs, AssetPack, AssetPackSnapshot, AssetPackStatus};
+use crate::asset_pack::AssetPackSnapshot;
+#[cfg(feature = "async")]
+use crate::asset_pack::{collect_asset_packs, AssetPack, AssetPackStatus};
 use crate::error::{BackgroundAssetsError, BridgeErrorPayload};
 use crate::ffi;
 
@@ -406,6 +408,7 @@ struct ProgressPayload {
     localized_description: String,
 }
 
+#[cfg(feature = "async")]
 #[derive(Deserialize)]
 struct UpdateCheckPayload {
     #[serde(rename = "updatingIDs")]

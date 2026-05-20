@@ -1,7 +1,10 @@
 use core::ffi::{c_char, c_void};
-use std::ffi::{CStr, CString};
+#[cfg(feature = "async")]
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::fmt;
 use std::ptr;
+#[cfg(feature = "async")]
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "async")]
@@ -23,10 +26,12 @@ pub struct AppExtensionInfo {
 }
 
 impl AppExtensionInfo {
+    #[cfg(feature = "async")]
     pub(crate) fn from_raw(ptr: *mut c_void) -> Option<Self> {
         (!ptr.is_null()).then_some(Self { ptr })
     }
 
+    #[cfg(feature = "async")]
     pub(crate) unsafe fn retained_from_borrowed(ptr: *mut c_void) -> Option<Self> {
         Self::from_raw(ffi::retained(ptr))
     }
@@ -208,6 +213,7 @@ where
     ExtensionEventStream { inner: stream }
 }
 
+#[cfg(feature = "async")]
 fn string_from_ptr(ptr: *const c_char) -> String {
     if ptr.is_null() {
         String::new()
@@ -236,7 +242,7 @@ pub unsafe extern "C" fn ba_rust_extension_downloads_for_request(
         let _ = request;
         let _ = manifest_url;
         let _ = extension_info;
-        return json_cstring(&Vec::<u64>::new());
+        json_cstring(&Vec::<u64>::new())
     }
 
     #[cfg(feature = "async")]
@@ -297,7 +303,7 @@ pub unsafe extern "C" fn ba_rust_extension_challenge_disposition(
     {
         let _ = download;
         let _ = challenge_json;
-        return ChallengeDisposition::PerformDefaultHandling as i32;
+        ChallengeDisposition::PerformDefaultHandling as i32
     }
 
     #[cfg(feature = "async")]
@@ -329,6 +335,12 @@ pub unsafe extern "C" fn ba_rust_extension_download_failed(
     download: *mut c_void,
     error_json: *const c_char,
 ) {
+    #[cfg(not(feature = "async"))]
+    {
+        let _ = download;
+        let _ = error_json;
+    }
+
     #[cfg(feature = "async")]
     {
         let Some(download) = (unsafe { Download::retained_from_borrowed(download) }) else {
@@ -352,6 +364,12 @@ pub unsafe extern "C" fn ba_rust_extension_download_finished(
     download: *mut c_void,
     file_url: *const c_char,
 ) {
+    #[cfg(not(feature = "async"))]
+    {
+        let _ = download;
+        let _ = file_url;
+    }
+
     #[cfg(feature = "async")]
     {
         let Some(download) = (unsafe { Download::retained_from_borrowed(download) }) else {

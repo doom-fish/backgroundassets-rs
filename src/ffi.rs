@@ -3,9 +3,11 @@ use std::ffi::{CStr, CString};
 
 use crate::error::BackgroundAssetsError;
 
+#[cfg(feature = "async")]
 pub type AsyncCallback =
     unsafe extern "C" fn(result: *mut c_void, error: *const c_char, ctx: *mut c_void);
 
+#[cfg(feature = "async")]
 pub type StreamCallback =
     unsafe extern "C" fn(ctx: *mut c_void, event_json: *mut c_char, done: bool);
 
@@ -82,11 +84,13 @@ extern "C" {
         download_ptr: *mut c_void,
         error_out: *mut *mut c_char,
     ) -> bool;
+    #[cfg(feature = "async")]
     pub fn ba_download_manager_fetch_current_downloads_async(
         manager_ptr: *mut c_void,
         ctx: *mut c_void,
         cb: AsyncCallback,
     );
+    #[cfg(feature = "async")]
     pub fn ba_download_manager_with_exclusive_control_async(
         manager_ptr: *mut c_void,
         before_epoch_seconds: f64,
@@ -120,29 +124,34 @@ extern "C" {
         raw_path: *const c_char,
         error_out: *mut *mut c_char,
     ) -> *mut c_char;
+    #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_all_asset_packs_async(
         ptr: *mut c_void,
         ctx: *mut c_void,
         cb: AsyncCallback,
     );
+    #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_asset_pack_async(
         ptr: *mut c_void,
         asset_pack_id: *const c_char,
         ctx: *mut c_void,
         cb: AsyncCallback,
     );
+    #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_status_relative_async(
         ptr: *mut c_void,
         asset_pack_ptr: *mut c_void,
         ctx: *mut c_void,
         cb: AsyncCallback,
     );
+    #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_local_status_async(
         ptr: *mut c_void,
         asset_pack_id: *const c_char,
         ctx: *mut c_void,
         cb: AsyncCallback,
     );
+    #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_ensure_local_availability_async(
         ptr: *mut c_void,
         asset_pack_ptr: *mut c_void,
@@ -150,17 +159,20 @@ extern "C" {
         ctx: *mut c_void,
         cb: AsyncCallback,
     );
+    #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_check_for_updates_async(
         ptr: *mut c_void,
         ctx: *mut c_void,
         cb: AsyncCallback,
     );
+    #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_remove_async(
         ptr: *mut c_void,
         asset_pack_id: *const c_char,
         ctx: *mut c_void,
         cb: AsyncCallback,
     );
+    #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_status_updates_stream_create(
         ptr: *mut c_void,
         asset_pack_id: *const c_char,
