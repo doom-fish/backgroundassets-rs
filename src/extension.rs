@@ -8,12 +8,16 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "async")]
+use doom_fish_utils::panic_safe::catch_user_panic;
+#[cfg(feature = "async")]
 use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream};
 use serde::{Deserialize, Serialize};
 
 use crate::asset_pack::AssetPackSnapshot;
 #[cfg(feature = "async")]
-use crate::download::{register_download_manager_delegate, DownloadManagerDelegate, DownloadManagerEventStream};
+use crate::download::{
+    register_download_manager_delegate, DownloadManagerDelegate, DownloadManagerEventStream,
+};
 use crate::download::{ContentRequest, Download, DownloadSnapshot};
 use crate::error::BackgroundAssetsError;
 use crate::ffi;
@@ -312,8 +316,10 @@ where
     } = configuration;
 
     let extension_events = install_global_downloader_extension(handler, extension_event_capacity);
-    let download_manager_events =
-        register_download_manager_delegate(download_manager_delegate, download_manager_event_capacity);
+    let download_manager_events = register_download_manager_delegate(
+        download_manager_delegate,
+        download_manager_event_capacity,
+    );
 
     ManagedDownloaderExtensionRegistration {
         extension_events,
@@ -377,7 +383,8 @@ pub unsafe extern "C" fn ba_rust_extension_should_download_asset_pack(
 
     #[cfg(feature = "async")]
     {
-        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json)) else {
+        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json))
+        else {
             return true;
         };
         let Ok(mut state_guard) = extension_state().lock() else {
@@ -386,7 +393,10 @@ pub unsafe extern "C" fn ba_rust_extension_should_download_asset_pack(
         let Some(state) = state_guard.as_mut() else {
             return true;
         };
-        let should_download = state.handler.should_download_asset_pack(&asset_pack);
+        let mut should_download = true;
+        catch_user_panic("ba_rust_extension_should_download_asset_pack", || {
+            should_download = state.handler.should_download_asset_pack(&asset_pack);
+        });
         state.sender.push(ExtensionEvent::ShouldDownloadAssetPack {
             asset_pack,
             should_download,
@@ -426,14 +436,20 @@ pub unsafe extern "C" fn ba_rust_extension_downloads_for_request(
             return json_cstring(&Vec::<u64>::new());
         };
 
-        match state
-            .handler
-            .downloads(request, &manifest_url, &extension_info)
-        {
+        let mut downloads_result = Err(BackgroundAssetsError::message(
+            "download plan handler panicked across the FFI boundary",
+        ));
+        catch_user_panic("ba_rust_extension_downloads_for_request", || {
+            downloads_result = state
+                .handler
+                .downloads(request, &manifest_url, &extension_info);
+        });
+
+        match downloads_result {
             Ok(downloads) => {
                 state.sender.push(ExtensionEvent::DownloadsRequested {
                     request,
-                    manifest_url: manifest_url.clone(),
+                    manifest_url,
                     extension_info: extension_info.snapshot(),
                     planned_downloads: downloads.iter().map(Download::snapshot).collect(),
                 });
@@ -484,7 +500,10 @@ pub unsafe extern "C" fn ba_rust_extension_challenge_disposition(
         let Some(state) = state_guard.as_mut() else {
             return ChallengeDisposition::PerformDefaultHandling as i32;
         };
-        let disposition = state.handler.did_receive_challenge(&download, &challenge);
+        let mut disposition = ChallengeDisposition::PerformDefaultHandling;
+        catch_user_panic("ba_rust_extension_challenge_disposition", || {
+            disposition = state.handler.did_receive_challenge(&download, &challenge);
+        });
         state.sender.push(ExtensionEvent::ChallengeRequested {
             download: download.snapshot(),
             challenge,
@@ -513,7 +532,9 @@ pub unsafe extern "C" fn ba_rust_extension_download_failed(
         let error = BackgroundAssetsError::from_json_str(&string_from_ptr(error_json));
         if let Ok(mut state_guard) = extension_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_failed(&download, &error);
+                catch_user_panic("ba_rust_extension_download_failed", || {
+                    state.handler.download_failed(&download, &error);
+                });
                 state.sender.push(ExtensionEvent::DownloadFailed {
                     download: download.snapshot(),
                     error,
@@ -542,7 +563,9 @@ pub unsafe extern "C" fn ba_rust_extension_download_finished(
         let file_url = string_from_ptr(file_url);
         if let Ok(mut state_guard) = extension_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_finished(&download, &file_url);
+                catch_user_panic("ba_rust_extension_download_finished", || {
+                    state.handler.download_finished(&download, &file_url);
+                });
                 state.sender.push(ExtensionEvent::DownloadFinished {
                     download: download.snapshot(),
                     file_url,
@@ -558,7 +581,9 @@ pub extern "C" fn ba_rust_extension_will_terminate() {
     {
         if let Ok(mut state_guard) = extension_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.extension_will_terminate();
+                catch_user_panic("ba_rust_extension_will_terminate", || {
+                    state.handler.extension_will_terminate();
+                });
                 state.sender.push(ExtensionEvent::Terminating);
             }
         }

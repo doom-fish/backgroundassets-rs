@@ -6,11 +6,18 @@ version = 3
 name = "backgroundassets"
 version = "0.3.0"
 dependencies = [
+ "bitflags",
  "doom-fish-utils",
  "pollster",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "bitflags"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "crossbeam-queue"
@@ -29,7 +36,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "doom-fish-utils"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "crossbeam-queue",
  "futures-util",

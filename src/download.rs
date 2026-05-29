@@ -14,6 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "async")]
 use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion};
 #[cfg(feature = "async")]
+use doom_fish_utils::panic_safe::catch_user_panic;
+#[cfg(feature = "async")]
 use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream};
 use serde::{Deserialize, Serialize};
 
@@ -123,9 +125,8 @@ pub struct DownloadWriteProgress {
 impl DownloadWriteProgress {
     #[allow(clippy::cast_precision_loss)]
     pub fn fraction_completed(&self) -> Option<f64> {
-        (self.total_bytes_expected_to_write > 0).then(|| {
-            self.total_bytes_written as f64 / self.total_bytes_expected_to_write as f64
-        })
+        (self.total_bytes_expected_to_write > 0)
+            .then(|| self.total_bytes_written as f64 / self.total_bytes_expected_to_write as f64)
     }
 }
 
@@ -632,9 +633,7 @@ fn download_snapshot_from_json(json: &str) -> Option<DownloadSnapshot> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_begin(
-    download_json: *const c_char,
-) {
+pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_begin(download_json: *const c_char) {
     #[cfg(not(feature = "async"))]
     {
         let _ = download_json;
@@ -647,7 +646,9 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_begin(
         };
         if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_did_begin(&download);
+                catch_user_panic("ba_rust_download_manager_delegate_did_begin", || {
+                    state.handler.download_did_begin(&download);
+                });
                 state.sender.push(DownloadManagerEvent::Began { download });
             }
         }
@@ -655,9 +656,7 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_begin(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_pause(
-    download_json: *const c_char,
-) {
+pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_pause(download_json: *const c_char) {
     #[cfg(not(feature = "async"))]
     {
         let _ = download_json;
@@ -670,7 +669,9 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_pause(
         };
         if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_did_pause(&download);
+                catch_user_panic("ba_rust_download_manager_delegate_did_pause", || {
+                    state.handler.download_did_pause(&download);
+                });
                 state.sender.push(DownloadManagerEvent::Paused { download });
             }
         }
@@ -704,8 +705,12 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_write_bytes(
         };
         if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_did_write_bytes(&download, &progress);
-                state.sender.push(DownloadManagerEvent::Progress { download, progress });
+                catch_user_panic("ba_rust_download_manager_delegate_did_write_bytes", || {
+                    state.handler.download_did_write_bytes(&download, &progress);
+                });
+                state
+                    .sender
+                    .push(DownloadManagerEvent::Progress { download, progress });
             }
         }
     }
@@ -737,7 +742,13 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_challenge_disposition
         let Some(state) = state_guard.as_mut() else {
             return ChallengeDisposition::PerformDefaultHandling as i32;
         };
-        let disposition = state.handler.did_receive_challenge(&download, &challenge);
+        let mut disposition = ChallengeDisposition::PerformDefaultHandling;
+        catch_user_panic(
+            "ba_rust_download_manager_delegate_challenge_disposition",
+            || {
+                disposition = state.handler.did_receive_challenge(&download, &challenge);
+            },
+        );
         state.sender.push(DownloadManagerEvent::ChallengeRequested {
             download,
             challenge,
@@ -766,8 +777,12 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_failed(
         let error = BackgroundAssetsError::from_json_str(&string_from_ptr(error_json));
         if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_failed(&download, &error);
-                state.sender.push(DownloadManagerEvent::Failed { download, error });
+                catch_user_panic("ba_rust_download_manager_delegate_failed", || {
+                    state.handler.download_failed(&download, &error);
+                });
+                state
+                    .sender
+                    .push(DownloadManagerEvent::Failed { download, error });
             }
         }
     }
@@ -792,8 +807,12 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_finished(
         let file_url = string_from_ptr(file_url);
         if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_finished(&download, &file_url);
-                state.sender.push(DownloadManagerEvent::Finished { download, file_url });
+                catch_user_panic("ba_rust_download_manager_delegate_finished", || {
+                    state.handler.download_finished(&download, &file_url);
+                });
+                state
+                    .sender
+                    .push(DownloadManagerEvent::Finished { download, file_url });
             }
         }
     }

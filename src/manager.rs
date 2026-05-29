@@ -5,12 +5,16 @@ use std::ptr;
 #[cfg(feature = "async")]
 use std::ffi::CStr;
 #[cfg(feature = "async")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "async")]
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "async")]
 use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion};
+#[cfg(feature = "async")]
+use doom_fish_utils::panic_safe::catch_user_panic;
 #[cfg(feature = "async")]
 use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream};
 
@@ -323,7 +327,11 @@ impl AssetPackManager {
         capacity: usize,
     ) -> Result<DownloadStatusStream, BackgroundAssetsError> {
         let (stream, sender) = BoundedAsyncStream::new(capacity.max(1));
-        let ctx = Box::into_raw(Box::new(StreamContext { sender })).cast::<c_void>();
+        let ctx = Box::into_raw(Box::new(StreamContext {
+            sender,
+            consumed: AtomicBool::new(false),
+        }))
+        .cast::<c_void>();
         let asset_pack_id_cstr = asset_pack_id
             .map(|value| ffi::required_cstring(value, "asset_pack_id"))
             .transpose()?;
@@ -607,12 +615,15 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_began(
 
     #[cfg(feature = "async")]
     {
-        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json)) else {
+        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json))
+        else {
             return;
         };
         if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_of_asset_pack_began(&asset_pack);
+                catch_user_panic("ba_rust_managed_asset_pack_download_delegate_began", || {
+                    state.handler.download_of_asset_pack_began(&asset_pack);
+                });
                 state
                     .sender
                     .push(ManagedAssetPackDownloadEvent::Began { asset_pack });
@@ -632,12 +643,18 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_paused(
 
     #[cfg(feature = "async")]
     {
-        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json)) else {
+        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json))
+        else {
             return;
         };
         if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_of_asset_pack_paused(&asset_pack);
+                catch_user_panic(
+                    "ba_rust_managed_asset_pack_download_delegate_paused",
+                    || {
+                        state.handler.download_of_asset_pack_paused(&asset_pack);
+                    },
+                );
                 state
                     .sender
                     .push(ManagedAssetPackDownloadEvent::Paused { asset_pack });
@@ -659,7 +676,8 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_progress(
 
     #[cfg(feature = "async")]
     {
-        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json)) else {
+        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json))
+        else {
             return;
         };
         let Some(progress) = progress_from_json(&string_from_ptr(progress_json)) else {
@@ -667,13 +685,20 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_progress(
         };
         if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
+                catch_user_panic(
+                    "ba_rust_managed_asset_pack_download_delegate_progress",
+                    || {
+                        state
+                            .handler
+                            .download_of_asset_pack_has_progress(&asset_pack, &progress);
+                    },
+                );
                 state
-                    .handler
-                    .download_of_asset_pack_has_progress(&asset_pack, &progress);
-                state.sender.push(ManagedAssetPackDownloadEvent::Downloading {
-                    asset_pack,
-                    progress,
-                });
+                    .sender
+                    .push(ManagedAssetPackDownloadEvent::Downloading {
+                        asset_pack,
+                        progress,
+                    });
             }
         }
     }
@@ -690,12 +715,18 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_finished(
 
     #[cfg(feature = "async")]
     {
-        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json)) else {
+        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json))
+        else {
             return;
         };
         if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
-                state.handler.download_of_asset_pack_finished(&asset_pack);
+                catch_user_panic(
+                    "ba_rust_managed_asset_pack_download_delegate_finished",
+                    || {
+                        state.handler.download_of_asset_pack_finished(&asset_pack);
+                    },
+                );
                 state
                     .sender
                     .push(ManagedAssetPackDownloadEvent::Finished { asset_pack });
@@ -717,19 +748,24 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_failed(
 
     #[cfg(feature = "async")]
     {
-        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json)) else {
+        let Some(asset_pack) = asset_pack_snapshot_from_json(&string_from_ptr(asset_pack_json))
+        else {
             return;
         };
         let error = BackgroundAssetsError::from_json_str(&string_from_ptr(error_json));
         if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
             if let Some(state) = state_guard.as_mut() {
+                catch_user_panic(
+                    "ba_rust_managed_asset_pack_download_delegate_failed",
+                    || {
+                        state
+                            .handler
+                            .download_of_asset_pack_failed(&asset_pack, &error);
+                    },
+                );
                 state
-                    .handler
-                    .download_of_asset_pack_failed(&asset_pack, &error);
-                state.sender.push(ManagedAssetPackDownloadEvent::Failed {
-                    asset_pack,
-                    error,
-                });
+                    .sender
+                    .push(ManagedAssetPackDownloadEvent::Failed { asset_pack, error });
             }
         }
     }
@@ -800,12 +836,19 @@ unsafe extern "C" fn string_async_cb(result: *mut c_void, error: *const c_char, 
 #[cfg(feature = "async")]
 struct StreamContext {
     sender: AsyncStreamSender<DownloadStatusUpdate>,
+    consumed: AtomicBool,
 }
 
 #[cfg(feature = "async")]
 unsafe extern "C" fn stream_callback(ctx: *mut c_void, event_json: *mut c_char, done: bool) {
     if done {
         if !ctx.is_null() {
+            // One-shot guard: only the caller that flips `consumed` from false
+            // to true reclaims the box, so a duplicate "done" cannot double-free.
+            let consumed = unsafe { &(*ctx.cast::<StreamContext>()).consumed };
+            if consumed.swap(true, Ordering::AcqRel) {
+                return;
+            }
             unsafe { drop(Box::from_raw(ctx.cast::<StreamContext>())) };
         }
         return;
