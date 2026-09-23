@@ -9,7 +9,14 @@ pub type AsyncCallback =
 
 #[cfg(feature = "async")]
 pub type StreamCallback =
-    unsafe extern "C" fn(ctx: *mut c_void, event_json: *mut c_char, done: bool);
+    unsafe extern "C" fn(ctx: *mut c_void, event_json: *const c_char, done: bool);
+
+#[cfg(feature = "async")]
+pub type ContextReferenceCallback = unsafe extern "C" fn(ctx: *mut c_void);
+
+#[cfg(feature = "async")]
+pub type ExclusiveControlCallback =
+    unsafe extern "C" fn(job: *mut c_void, acquired_lock: bool, error_json: *const c_char);
 
 extern "C" {
     pub fn ba_string_free(string: *mut c_char);
@@ -68,7 +75,7 @@ extern "C" {
         error_out: *mut *mut c_char,
     ) -> *mut c_void;
 
-    pub fn ba_download_manager_shared() -> *mut c_void;
+    pub fn ba_download_manager_shared(error_out: *mut *mut c_char) -> *mut c_void;
     pub fn ba_download_manager_schedule_download(
         manager_ptr: *mut c_void,
         download_ptr: *mut c_void,
@@ -85,7 +92,12 @@ extern "C" {
         error_out: *mut *mut c_char,
     ) -> bool;
     #[cfg(feature = "async")]
-    pub fn ba_download_manager_delegate_install() -> *mut c_void;
+    pub fn ba_download_manager_delegate_install(
+        ctx: *mut c_void,
+        retain: ContextReferenceCallback,
+        release: ContextReferenceCallback,
+        error_out: *mut *mut c_char,
+    ) -> *mut c_void;
     #[cfg(feature = "async")]
     pub fn ba_download_manager_delegate_clear_if_matches(delegate_ptr: *mut c_void);
     #[cfg(feature = "async")]
@@ -95,17 +107,17 @@ extern "C" {
         cb: AsyncCallback,
     );
     #[cfg(feature = "async")]
-    pub fn ba_download_manager_with_exclusive_control_async(
+    pub fn ba_download_manager_with_exclusive_control(
         manager_ptr: *mut c_void,
         before_epoch_seconds: f64,
         has_before_date: bool,
-        ctx: *mut c_void,
-        cb: AsyncCallback,
+        job: *mut c_void,
+        cb: ExclusiveControlCallback,
     );
 
     pub fn ba_app_extension_info_snapshot_json(ptr: *mut c_void) -> *mut c_char;
 
-    pub fn ba_asset_pack_manager_shared() -> *mut c_void;
+    pub fn ba_asset_pack_manager_shared(error_out: *mut *mut c_char) -> *mut c_void;
     pub fn ba_asset_pack_manager_asset_pack_is_available_locally(
         ptr: *mut c_void,
         asset_pack_id: *const c_char,
@@ -129,7 +141,12 @@ extern "C" {
         error_out: *mut *mut c_char,
     ) -> *mut c_char;
     #[cfg(feature = "async")]
-    pub fn ba_asset_pack_manager_delegate_install() -> *mut c_void;
+    pub fn ba_asset_pack_manager_delegate_install(
+        ctx: *mut c_void,
+        retain: ContextReferenceCallback,
+        release: ContextReferenceCallback,
+        error_out: *mut *mut c_char,
+    ) -> *mut c_void;
     #[cfg(feature = "async")]
     pub fn ba_asset_pack_manager_delegate_clear_if_matches(delegate_ptr: *mut c_void);
     #[cfg(feature = "async")]
@@ -185,6 +202,8 @@ extern "C" {
         ptr: *mut c_void,
         asset_pack_id: *const c_char,
         ctx: *mut c_void,
+        retain: ContextReferenceCallback,
+        release: ContextReferenceCallback,
         cb: StreamCallback,
     ) -> *mut c_void;
 }

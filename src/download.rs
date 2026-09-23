@@ -7,21 +7,29 @@ use std::ptr;
 #[cfg(feature = "async")]
 use std::ffi::CStr;
 #[cfg(feature = "async")]
-use std::sync::{Mutex, OnceLock};
+use std::future::Future;
+#[cfg(feature = "async")]
+use std::pin::Pin;
+#[cfg(feature = "async")]
+use std::task::{Context, Poll};
 #[cfg(feature = "async")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "async")]
-use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion};
+use doom_fish_utils::callback_context::CallbackContext;
 #[cfg(feature = "async")]
-use doom_fish_utils::panic_safe::catch_user_panic;
+use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion, AsyncCompletionFuture};
 #[cfg(feature = "async")]
-use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream};
+use doom_fish_utils::panic_safe::{catch_user_panic, catch_user_panic_result};
+#[cfg(feature = "async")]
+use doom_fish_utils::stream::BoundedAsyncStream;
 use serde::{Deserialize, Serialize};
 
 use crate::error::BackgroundAssetsError;
 use crate::extension::{AuthenticationChallenge, ChallengeDisposition};
 use crate::ffi;
+#[cfg(feature = "async")]
+use crate::handler::HandlerState;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum ContentRequest {
@@ -319,6 +327,12 @@ impl UrlDownload {
         app_group_id: &str,
         options: UrlDownloadOptions,
     ) -> Result<Self, BackgroundAssetsError> {
+        validate_file_size(file_size)?;
+        let priority = validate_priority(
+            options.priority,
+            DownloadPriority::min(),
+            DownloadPriority::max(),
+        )?;
         let identifier = ffi::required_cstring(identifier, "identifier")?;
         let url = ffi::required_cstring(url, "url")?;
         let method = ffi::required_cstring(&options.method, "method")?;
@@ -328,9 +342,6 @@ impl UrlDownload {
         let app_group_id = ffi::required_cstring(app_group_id, "app_group_id")?;
         let mut error: *mut c_char = ptr::null_mut();
 
-        let priority = isize::try_from(options.priority.raw_value()).map_err(|_| {
-            BackgroundAssetsError::invalid_argument("download priority is out of range")
-        })?;
         let ptr = unsafe {
             ffi::ba_url_download_create(
                 identifier.as_ptr(),
@@ -341,7 +352,7 @@ impl UrlDownload {
                 app_group_id.as_ptr(),
                 options.essential,
                 priority,
-                &mut error,
+                &raw mut error,
             )
         };
 
@@ -367,17 +378,45 @@ impl Deref for UrlDownload {
     }
 }
 
+fn validate_file_size(file_size: u64) -> Result<(), BackgroundAssetsError> {
+    if file_size == 0 || isize::try_from(file_size).is_err() {
+        return Err(BackgroundAssetsError::invalid_argument(format!(
+            "file_size must be between 1 and {} bytes, got {file_size}",
+            isize::MAX
+        )));
+    }
+    Ok(())
+}
+
+fn validate_priority(
+    priority: DownloadPriority,
+    min: DownloadPriority,
+    max: DownloadPriority,
+) -> Result<isize, BackgroundAssetsError> {
+    if priority.raw_value() < min.raw_value() || priority.raw_value() > max.raw_value() {
+        return Err(BackgroundAssetsError::invalid_argument(format!(
+            "download priority {} is outside {}..={}",
+            priority.raw_value(),
+            min.raw_value(),
+            max.raw_value()
+        )));
+    }
+    isize::try_from(priority.raw_value())
+        .map_err(|_| BackgroundAssetsError::invalid_argument("download priority is out of range"))
+}
+
 pub struct DownloadManager {
     ptr: *mut c_void,
 }
 
 impl DownloadManager {
-    pub fn shared() -> Option<Self> {
-        Self::from_raw(unsafe { ffi::ba_download_manager_shared() })
-    }
-
-    fn from_raw(ptr: *mut c_void) -> Option<Self> {
-        (!ptr.is_null()).then_some(Self { ptr })
+    pub fn shared() -> Result<Self, BackgroundAssetsError> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let ptr = unsafe { ffi::ba_download_manager_shared(&raw mut error) };
+        if ptr.is_null() {
+            return Err(BackgroundAssetsError::from_owned_json_ptr(error));
+        }
+        Ok(Self { ptr })
     }
 
     #[cfg(feature = "async")]
@@ -388,7 +427,7 @@ impl DownloadManager {
     pub fn schedule_download(&self, download: &Download) -> Result<(), BackgroundAssetsError> {
         let mut error: *mut c_char = ptr::null_mut();
         let scheduled = unsafe {
-            ffi::ba_download_manager_schedule_download(self.ptr, download.ptr, &mut error)
+            ffi::ba_download_manager_schedule_download(self.ptr, download.ptr, &raw mut error)
         };
         if scheduled {
             Ok(())
@@ -403,7 +442,11 @@ impl DownloadManager {
     ) -> Result<(), BackgroundAssetsError> {
         let mut error: *mut c_char = ptr::null_mut();
         let started = unsafe {
-            ffi::ba_download_manager_start_foreground_download(self.ptr, download.ptr, &mut error)
+            ffi::ba_download_manager_start_foreground_download(
+                self.ptr,
+                download.ptr,
+                &raw mut error,
+            )
         };
         if started {
             Ok(())
@@ -414,8 +457,9 @@ impl DownloadManager {
 
     pub fn cancel_download(&self, download: &Download) -> Result<(), BackgroundAssetsError> {
         let mut error: *mut c_char = ptr::null_mut();
-        let cancelled =
-            unsafe { ffi::ba_download_manager_cancel_download(self.ptr, download.ptr, &mut error) };
+        let cancelled = unsafe {
+            ffi::ba_download_manager_cancel_download(self.ptr, download.ptr, &raw mut error)
+        };
         if cancelled {
             Ok(())
         } else {
@@ -433,34 +477,119 @@ impl DownloadManager {
                 downloads_async_cb,
             );
         }
-        let OpaquePtr(ptr) = future.await.map_err(BackgroundAssetsError::message)?;
+        let OpaquePtr(ptr) = future.await.map_err(BackgroundAssetsError::from_json_str)?;
         Ok(collect_downloads(ptr))
     }
 
     #[cfg(feature = "async")]
-    pub async fn with_exclusive_control(
+    pub fn with_exclusive_control<F, R>(
         &self,
         before: Option<SystemTime>,
-    ) -> Result<bool, BackgroundAssetsError> {
-        let (future, ctx) = AsyncCompletion::<String>::create();
+        body: F,
+    ) -> ExclusiveControlFuture<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let (future, job) = exclusive_control_job(body);
         let (seconds, has_before) = before.map_or((0.0, false), |timestamp| {
             let duration = timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
             (duration.as_secs_f64(), true)
         });
         unsafe {
-            ffi::ba_download_manager_with_exclusive_control_async(
+            ffi::ba_download_manager_with_exclusive_control(
                 self.ptr,
                 seconds,
                 has_before,
-                ctx,
-                string_async_cb,
+                job,
+                exclusive_control_callback,
             );
         }
-        let value = future.await.map_err(BackgroundAssetsError::message)?;
-        Ok(matches!(
-            value.as_str(),
-            "1" | "true" | "TRUE" | "yes" | "ok"
-        ))
+        future
+    }
+}
+
+#[cfg(feature = "async")]
+type ExclusiveControlJob = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+#[cfg(feature = "async")]
+fn exclusive_control_job<F, R>(body: F) -> (ExclusiveControlFuture<R>, *mut c_void)
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let (future, ctx) = AsyncCompletion::<R>::create();
+    let completion = CompletionPtr(ctx);
+    let job: ExclusiveControlJob = Box::new(move |acquired| {
+        let ctx = completion.into_raw();
+        let result = acquired.and_then(|()| {
+            catch_user_panic_result("DownloadManager::with_exclusive_control body", body)
+                .ok_or_else(|| "the exclusive-control body panicked".to_owned())
+        });
+        unsafe { AsyncCompletion::complete_with_result(ctx, result) };
+    });
+    (
+        ExclusiveControlFuture { inner: future },
+        Box::into_raw(Box::new(job)).cast::<c_void>(),
+    )
+}
+
+#[cfg(feature = "async")]
+struct CompletionPtr(*mut c_void);
+
+#[cfg(feature = "async")]
+unsafe impl Send for CompletionPtr {}
+
+#[cfg(feature = "async")]
+impl CompletionPtr {
+    fn into_raw(self) -> *mut c_void {
+        self.0
+    }
+}
+
+#[cfg(feature = "async")]
+unsafe extern "C" fn exclusive_control_callback(
+    job: *mut c_void,
+    acquired_lock: bool,
+    error_json: *const c_char,
+) {
+    if job.is_null() {
+        return;
+    }
+    let job = unsafe { Box::from_raw(job.cast::<ExclusiveControlJob>()) };
+    let acquired = if acquired_lock {
+        Ok(())
+    } else if error_json.is_null() {
+        Err("exclusive control over the download manager was not acquired".to_owned())
+    } else {
+        Err(string_from_ptr(error_json))
+    };
+    catch_user_panic("DownloadManager::with_exclusive_control", move || {
+        job(acquired);
+    });
+}
+
+#[cfg(feature = "async")]
+pub struct ExclusiveControlFuture<R> {
+    inner: AsyncCompletionFuture<R>,
+}
+
+#[cfg(feature = "async")]
+impl<R> fmt::Debug for ExclusiveControlFuture<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExclusiveControlFuture")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<R> Future for ExclusiveControlFuture<R> {
+    type Output = Result<R, BackgroundAssetsError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.inner)
+            .poll(cx)
+            .map(|result| result.map_err(BackgroundAssetsError::from_json_str))
     }
 }
 
@@ -487,8 +616,15 @@ impl fmt::Debug for DownloadManager {
 }
 
 #[cfg(feature = "async")]
+type DownloadManagerDelegateState = HandlerState<dyn DownloadManagerDelegate, DownloadManagerEvent>;
+
+#[cfg(feature = "async")]
+type DownloadManagerDelegateContext = CallbackContext<DownloadManagerDelegateState>;
+
+#[cfg(feature = "async")]
 pub struct DownloadManagerEventStream {
     inner: BoundedAsyncStream<DownloadManagerEvent>,
+    context: DownloadManagerDelegateContext,
     bridge_ptr: *mut c_void,
 }
 
@@ -509,11 +645,6 @@ impl DownloadManagerEventStream {
     pub fn buffered_count(&self) -> usize {
         self.inner.buffered_count()
     }
-
-    fn with_bridge_ptr(mut self, bridge_ptr: *mut c_void) -> Self {
-        self.bridge_ptr = bridge_ptr;
-        self
-    }
 }
 
 #[cfg(feature = "async")]
@@ -529,45 +660,11 @@ impl fmt::Debug for DownloadManagerEventStream {
 #[cfg(feature = "async")]
 impl Drop for DownloadManagerEventStream {
     fn drop(&mut self) {
-        if !self.bridge_ptr.is_null() {
-            unsafe {
-                ffi::ba_download_manager_delegate_clear_if_matches(self.bridge_ptr);
-                ffi::ba_object_release(self.bridge_ptr);
-            }
+        self.context.deactivate();
+        unsafe {
+            ffi::ba_download_manager_delegate_clear_if_matches(self.bridge_ptr);
+            ffi::ba_object_release(self.bridge_ptr);
         }
-    }
-}
-
-#[cfg(feature = "async")]
-struct DownloadManagerDelegateState {
-    handler: Box<dyn DownloadManagerDelegate>,
-    sender: AsyncStreamSender<DownloadManagerEvent>,
-}
-
-#[cfg(feature = "async")]
-fn download_manager_delegate_state() -> &'static Mutex<Option<DownloadManagerDelegateState>> {
-    static STATE: OnceLock<Mutex<Option<DownloadManagerDelegateState>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(None))
-}
-
-#[cfg(feature = "async")]
-pub(crate) fn register_download_manager_delegate<H>(
-    handler: H,
-    capacity: usize,
-) -> DownloadManagerEventStream
-where
-    H: DownloadManagerDelegate,
-{
-    let (stream, sender) = BoundedAsyncStream::new(capacity.max(1));
-    if let Ok(mut state) = download_manager_delegate_state().lock() {
-        *state = Some(DownloadManagerDelegateState {
-            handler: Box::new(handler),
-            sender,
-        });
-    }
-    DownloadManagerEventStream {
-        inner: stream,
-        bridge_ptr: ptr::null_mut(),
     }
 }
 
@@ -579,14 +676,26 @@ pub fn install_global_download_manager_delegate<H>(
 where
     H: DownloadManagerDelegate,
 {
-    let stream = register_download_manager_delegate(handler, capacity);
-    let bridge_ptr = unsafe { ffi::ba_download_manager_delegate_install() };
+    let (stream, sender) = BoundedAsyncStream::new(capacity.max(1));
+    let handler: Box<dyn DownloadManagerDelegate> = Box::new(handler);
+    let context = DownloadManagerDelegateContext::new(HandlerState::new(handler, sender));
+    let mut error: *mut c_char = ptr::null_mut();
+    let bridge_ptr = unsafe {
+        ffi::ba_download_manager_delegate_install(
+            context.as_ptr(),
+            DownloadManagerDelegateContext::RETAIN,
+            DownloadManagerDelegateContext::RELEASE,
+            &raw mut error,
+        )
+    };
     if bridge_ptr.is_null() {
-        return Err(BackgroundAssetsError::message(
-            "failed to install download-manager delegate",
-        ));
+        return Err(BackgroundAssetsError::from_owned_json_ptr(error));
     }
-    Ok(stream.with_bridge_ptr(bridge_ptr))
+    Ok(DownloadManagerEventStream {
+        inner: stream,
+        context,
+        bridge_ptr,
+    })
 }
 
 #[cfg(feature = "async")]
@@ -626,6 +735,7 @@ impl From<DownloadSnapshotPayload> for DownloadSnapshot {
     }
 }
 
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 fn download_snapshot_from_json(json: &str) -> Option<DownloadSnapshot> {
     serde_json::from_str::<DownloadSnapshotPayload>(json)
         .ok()
@@ -633,10 +743,13 @@ fn download_snapshot_from_json(json: &str) -> Option<DownloadSnapshot> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_begin(download_json: *const c_char) {
+pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_begin(
+    ctx: *mut c_void,
+    download_json: *const c_char,
+) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download_json;
+        let _ = (ctx, download_json);
     }
 
     #[cfg(feature = "async")]
@@ -644,22 +757,24 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_begin(download_js
         let Some(download) = download_snapshot_from_json(&string_from_ptr(download_json)) else {
             return;
         };
-        if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_download_manager_delegate_did_begin", || {
-                    state.handler.download_did_begin(&download);
-                });
+        let site = "DownloadManagerDelegate::download_did_begin";
+        unsafe {
+            DownloadManagerDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| handler.download_did_begin(&download));
                 state.sender.push(DownloadManagerEvent::Began { download });
-            }
-        }
+            })
+        };
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_pause(download_json: *const c_char) {
+pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_pause(
+    ctx: *mut c_void,
+    download_json: *const c_char,
+) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download_json;
+        let _ = (ctx, download_json);
     }
 
     #[cfg(feature = "async")]
@@ -667,19 +782,19 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_pause(download_js
         let Some(download) = download_snapshot_from_json(&string_from_ptr(download_json)) else {
             return;
         };
-        if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_download_manager_delegate_did_pause", || {
-                    state.handler.download_did_pause(&download);
-                });
+        let site = "DownloadManagerDelegate::download_did_pause";
+        unsafe {
+            DownloadManagerDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| handler.download_did_pause(&download));
                 state.sender.push(DownloadManagerEvent::Paused { download });
-            }
-        }
+            })
+        };
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_write_bytes(
+    ctx: *mut c_void,
     download_json: *const c_char,
     bytes_written: i64,
     total_bytes_written: i64,
@@ -687,10 +802,13 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_write_bytes(
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download_json;
-        let _ = bytes_written;
-        let _ = total_bytes_written;
-        let _ = total_bytes_expected_to_write;
+        let _ = (
+            ctx,
+            download_json,
+            bytes_written,
+            total_bytes_written,
+            total_bytes_expected_to_write,
+        );
     }
 
     #[cfg(feature = "async")]
@@ -703,28 +821,29 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_did_write_bytes(
             total_bytes_written,
             total_bytes_expected_to_write,
         };
-        if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_download_manager_delegate_did_write_bytes", || {
-                    state.handler.download_did_write_bytes(&download, &progress);
+        let site = "DownloadManagerDelegate::download_did_write_bytes";
+        unsafe {
+            DownloadManagerDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| {
+                    handler.download_did_write_bytes(&download, &progress);
                 });
                 state
                     .sender
                     .push(DownloadManagerEvent::Progress { download, progress });
-            }
-        }
+            })
+        };
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_download_manager_delegate_challenge_disposition(
+    ctx: *mut c_void,
     download_json: *const c_char,
     challenge_json: *const c_char,
 ) -> i32 {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download_json;
-        let _ = challenge_json;
+        let _ = (ctx, download_json, challenge_json);
         ChallengeDisposition::PerformDefaultHandling as i32
     }
 
@@ -736,37 +855,35 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_challenge_disposition
         let challenge =
             serde_json::from_str::<AuthenticationChallenge>(&string_from_ptr(challenge_json))
                 .unwrap_or_default();
-        let Ok(mut state_guard) = download_manager_delegate_state().lock() else {
-            return ChallengeDisposition::PerformDefaultHandling as i32;
+        let site = "DownloadManagerDelegate::did_receive_challenge";
+        let disposition = unsafe {
+            DownloadManagerDelegateContext::with(ctx, site, |state| {
+                let disposition = state
+                    .call(site, |handler| {
+                        handler.did_receive_challenge(&download, &challenge)
+                    })
+                    .unwrap_or_default();
+                state.sender.push(DownloadManagerEvent::ChallengeRequested {
+                    download,
+                    challenge,
+                    disposition,
+                });
+                disposition
+            })
         };
-        let Some(state) = state_guard.as_mut() else {
-            return ChallengeDisposition::PerformDefaultHandling as i32;
-        };
-        let mut disposition = ChallengeDisposition::PerformDefaultHandling;
-        catch_user_panic(
-            "ba_rust_download_manager_delegate_challenge_disposition",
-            || {
-                disposition = state.handler.did_receive_challenge(&download, &challenge);
-            },
-        );
-        state.sender.push(DownloadManagerEvent::ChallengeRequested {
-            download,
-            challenge,
-            disposition,
-        });
-        disposition as i32
+        disposition.unwrap_or_default() as i32
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_download_manager_delegate_failed(
+    ctx: *mut c_void,
     download_json: *const c_char,
     error_json: *const c_char,
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download_json;
-        let _ = error_json;
+        let _ = (ctx, download_json, error_json);
     }
 
     #[cfg(feature = "async")]
@@ -774,29 +891,28 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_failed(
         let Some(download) = download_snapshot_from_json(&string_from_ptr(download_json)) else {
             return;
         };
-        let error = BackgroundAssetsError::from_json_str(&string_from_ptr(error_json));
-        if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_download_manager_delegate_failed", || {
-                    state.handler.download_failed(&download, &error);
-                });
+        let error = BackgroundAssetsError::from_json_str(string_from_ptr(error_json));
+        let site = "DownloadManagerDelegate::download_failed";
+        unsafe {
+            DownloadManagerDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| handler.download_failed(&download, &error));
                 state
                     .sender
                     .push(DownloadManagerEvent::Failed { download, error });
-            }
-        }
+            })
+        };
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_download_manager_delegate_finished(
+    ctx: *mut c_void,
     download_json: *const c_char,
     file_url: *const c_char,
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download_json;
-        let _ = file_url;
+        let _ = (ctx, download_json, file_url);
     }
 
     #[cfg(feature = "async")]
@@ -805,16 +921,17 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_finished(
             return;
         };
         let file_url = string_from_ptr(file_url);
-        if let Ok(mut state_guard) = download_manager_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_download_manager_delegate_finished", || {
-                    state.handler.download_finished(&download, &file_url);
+        let site = "DownloadManagerDelegate::download_finished";
+        unsafe {
+            DownloadManagerDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| {
+                    handler.download_finished(&download, &file_url);
                 });
                 state
                     .sender
                     .push(DownloadManagerEvent::Finished { download, file_url });
-            }
-        }
+            })
+        };
     }
 }
 
@@ -841,19 +958,6 @@ unsafe extern "C" fn downloads_async_cb(
                 "download-array pointer must not be null".into(),
             );
         };
-    }
-}
-
-#[cfg(feature = "async")]
-unsafe extern "C" fn string_async_cb(result: *mut c_void, error: *const c_char, ctx: *mut c_void) {
-    if !error.is_null() {
-        let message = unsafe { error_from_cstr(error) };
-        unsafe { AsyncCompletion::<String>::complete_err(ctx, message) };
-    } else if !result.is_null() {
-        let value = unsafe { ffi::owned_string(result.cast::<c_char>()) };
-        unsafe { AsyncCompletion::complete_ok(ctx, value) };
-    } else {
-        unsafe { AsyncCompletion::<String>::complete_err(ctx, "missing string result".into()) };
     }
 }
 
@@ -903,5 +1007,223 @@ mod tests {
         };
 
         assert_eq!(progress.fraction_completed(), Some(0.5));
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+mod async_tests {
+    use std::ffi::CString;
+    use std::ptr;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use doom_fish_utils::stream::BoundedAsyncStream;
+
+    use super::{
+        ba_rust_download_manager_delegate_challenge_disposition,
+        ba_rust_download_manager_delegate_did_begin, exclusive_control_callback,
+        exclusive_control_job, DownloadManagerDelegate, DownloadManagerDelegateContext,
+        DownloadManagerEvent, DownloadSnapshot,
+    };
+    use crate::extension::{AuthenticationChallenge, ChallengeDisposition};
+    use crate::handler::HandlerState;
+
+    const DOWNLOAD_JSON: &str = r#"{"identifier":"download.one","uniqueIdentifier":"abc","status":2,"priority":0,"isEssential":false,"isURLDownload":true}"#;
+    const CHALLENGE_JSON: &str = r#"{"authenticationMethod":"NSURLAuthenticationMethodServerTrust","host":"example.com","previousFailureCount":2,"proposedCredentialHasPassword":true,"proposedCredentialUser":"user"}"#;
+
+    #[test]
+    fn exclusive_control_body_runs_before_the_handler_returns() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        let (future, job) = exclusive_control_job(move || {
+            flag.store(true, Ordering::SeqCst);
+            42
+        });
+        assert!(!ran.load(Ordering::SeqCst));
+
+        unsafe { exclusive_control_callback(job, true, ptr::null()) };
+
+        assert!(ran.load(Ordering::SeqCst));
+        assert_eq!(pollster::block_on(future).unwrap(), 42);
+    }
+
+    #[test]
+    fn exclusive_control_failure_skips_the_body_and_keeps_the_error() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        let (future, job) = exclusive_control_job(move || flag.store(true, Ordering::SeqCst));
+        let error =
+            CString::new(r#"{"domain":"BAErrorDomain","code":51,"message":"inactive"}"#).unwrap();
+
+        unsafe { exclusive_control_callback(job, false, error.as_ptr()) };
+
+        assert!(!ran.load(Ordering::SeqCst));
+        let error = pollster::block_on(future).unwrap_err();
+        assert_eq!(error.domain(), "BAErrorDomain");
+        assert_eq!(error.code(), 51);
+        assert_eq!(error.message_text(), "inactive");
+    }
+
+    #[test]
+    fn exclusive_control_not_acquired_without_error_is_an_error() {
+        let (future, job) = exclusive_control_job(|| 1);
+        unsafe { exclusive_control_callback(job, false, ptr::null()) };
+        let error = pollster::block_on(future).unwrap_err();
+        assert!(error.message_text().contains("not acquired"), "{error}");
+    }
+
+    #[test]
+    fn exclusive_control_body_panic_becomes_an_error() {
+        let (future, job) = exclusive_control_job(|| -> u8 { panic!("body panic") });
+        unsafe { exclusive_control_callback(job, true, ptr::null()) };
+        let error = pollster::block_on(future).unwrap_err();
+        assert!(error.message_text().contains("panicked"), "{error}");
+    }
+
+    struct Value(Arc<AtomicUsize>);
+
+    impl Drop for Value {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn exclusive_control_completes_after_the_future_is_dropped() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&dropped);
+        let (future, job) = exclusive_control_job(move || Value(counter));
+        drop(future);
+        unsafe { exclusive_control_callback(job, true, ptr::null()) };
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    struct Probe {
+        began: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        disposition: ChallengeDisposition,
+        panic_on_begin: bool,
+    }
+
+    impl DownloadManagerDelegate for Probe {
+        fn download_did_begin(&mut self, download: &DownloadSnapshot) {
+            assert_eq!(download.identifier, "download.one");
+            self.began.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic_on_begin, "handler panic");
+        }
+
+        fn did_receive_challenge(
+            &mut self,
+            _download: &DownloadSnapshot,
+            challenge: &AuthenticationChallenge,
+        ) -> ChallengeDisposition {
+            assert_eq!(challenge.host, "example.com");
+            assert_eq!(
+                challenge.authentication_method,
+                "NSURLAuthenticationMethodServerTrust"
+            );
+            assert_eq!(challenge.previous_failure_count, 2);
+            assert_eq!(challenge.proposed_credential_user.as_deref(), Some("user"));
+            assert!(challenge.proposed_credential_has_password);
+            self.disposition
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn probe_context(
+        panic_on_begin: bool,
+    ) -> (
+        BoundedAsyncStream<DownloadManagerEvent>,
+        DownloadManagerDelegateContext,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+    ) {
+        let began = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (stream, sender) = BoundedAsyncStream::new(8);
+        let handler: Box<dyn DownloadManagerDelegate> = Box::new(Probe {
+            began: Arc::clone(&began),
+            drops: Arc::clone(&drops),
+            disposition: ChallengeDisposition::CancelAuthenticationChallenge,
+            panic_on_begin,
+        });
+        let context = DownloadManagerDelegateContext::new(HandlerState::new(handler, sender));
+        (stream, context, began, drops)
+    }
+
+    #[test]
+    fn delegate_callbacks_stop_when_the_stream_side_is_dropped() {
+        let (stream, context, began, drops) = probe_context(false);
+        let foreign = context.retained_ptr();
+        let download = CString::new(DOWNLOAD_JSON).unwrap();
+
+        unsafe { ba_rust_download_manager_delegate_did_begin(foreign, download.as_ptr()) };
+        assert_eq!(began.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            stream.try_next(),
+            Some(DownloadManagerEvent::Began { download }) if download.identifier == "download.one"
+        ));
+
+        drop(context);
+        unsafe { ba_rust_download_manager_delegate_did_begin(foreign, download.as_ptr()) };
+        assert_eq!(began.load(Ordering::SeqCst), 1);
+        assert!(stream.try_next().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        unsafe { (DownloadManagerDelegateContext::RELEASE)(foreign) };
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(stream.is_closed());
+    }
+
+    #[test]
+    fn delegate_handler_panic_is_contained_and_the_event_is_still_delivered() {
+        let (stream, context, began, _drops) = probe_context(true);
+        let download = CString::new(DOWNLOAD_JSON).unwrap();
+
+        unsafe { ba_rust_download_manager_delegate_did_begin(context.as_ptr(), download.as_ptr()) };
+        unsafe { ba_rust_download_manager_delegate_did_begin(context.as_ptr(), download.as_ptr()) };
+
+        assert_eq!(began.load(Ordering::SeqCst), 2);
+        assert!(stream.try_next().is_some());
+        assert!(stream.try_next().is_some());
+    }
+
+    #[test]
+    fn challenge_disposition_comes_from_the_handler_while_active() {
+        let (stream, context, _began, _drops) = probe_context(false);
+        let download = CString::new(DOWNLOAD_JSON).unwrap();
+        let challenge = CString::new(CHALLENGE_JSON).unwrap();
+
+        let raw = unsafe {
+            ba_rust_download_manager_delegate_challenge_disposition(
+                context.as_ptr(),
+                download.as_ptr(),
+                challenge.as_ptr(),
+            )
+        };
+        assert_eq!(
+            raw,
+            ChallengeDisposition::CancelAuthenticationChallenge as i32
+        );
+        assert!(matches!(
+            stream.try_next(),
+            Some(DownloadManagerEvent::ChallengeRequested { disposition, .. })
+                if disposition == ChallengeDisposition::CancelAuthenticationChallenge
+        ));
+
+        context.deactivate();
+        let raw = unsafe {
+            ba_rust_download_manager_delegate_challenge_disposition(
+                context.as_ptr(),
+                download.as_ptr(),
+                challenge.as_ptr(),
+            )
+        };
+        assert_eq!(raw, ChallengeDisposition::PerformDefaultHandling as i32);
     }
 }

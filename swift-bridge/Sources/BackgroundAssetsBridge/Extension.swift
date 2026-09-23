@@ -1,9 +1,12 @@
 import BackgroundAssets
 import Foundation
 
+@_silgen_name("ba_rust_string_free")
+func ba_rust_string_free(_ string: UnsafeMutablePointer<CChar>?)
+
 @_silgen_name("ba_rust_extension_downloads_for_request")
 func ba_rust_extension_downloads_for_request(
-    _ request: Int32,
+    _ request: Int,
     _ manifestURL: UnsafePointer<CChar>?,
     _ extensionInfo: UnsafeMutableRawPointer?
 ) -> UnsafeMutablePointer<CChar>?
@@ -70,17 +73,19 @@ public final class BackgroundAssetsRustDownloaderExtension: NSObject, BADownload
         manifestURL: URL,
         extensionInfo: BAAppExtensionInfo
     ) -> Set<BADownload> {
+        DownloadsRequestScope.shared.enter()
+        defer { DownloadsRequestScope.shared.leave() }
         let manifest = manifestURL.absoluteString
         let payload = manifest.withCString {
             ba_rust_extension_downloads_for_request(
-                Int32(request.rawValue),
+                request.rawValue,
                 $0,
                 Unmanaged.passUnretained(extensionInfo).toOpaque()
             )
         }
         guard let payload else { return [] }
         let json = String(cString: payload)
-        ba_string_free(payload)
+        ba_rust_string_free(payload)
         return decodeDownloadPointers(json)
     }
 

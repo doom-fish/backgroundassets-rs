@@ -30,7 +30,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! pollster::block_on(async {
-//!     let Some(manager) = AsyncAssetPackManager::shared() else {
+//!     let Ok(manager) = AsyncAssetPackManager::shared() else {
 //!         return Ok::<(), backgroundassets::BackgroundAssetsError>(());
 //!     };
 //!     let packs = manager.all_asset_packs().await?;
@@ -46,7 +46,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion, AsyncCompletionFuture};
 use serde::Deserialize;
@@ -58,11 +58,10 @@ use crate::ffi;
 use crate::manager::AssetPackManager;
 pub use crate::download::{
     install_global_download_manager_delegate, DownloadManagerDelegate, DownloadManagerEvent,
-    DownloadManagerEventStream, DownloadWriteProgress,
+    DownloadManagerEventStream, DownloadWriteProgress, ExclusiveControlFuture,
 };
 pub use crate::extension::{
-    install_global_managed_downloader_extension, ManagedDownloaderExtensionConfiguration,
-    ManagedDownloaderExtensionRegistration,
+    install_global_managed_downloader_extension, ManagedDownloaderExtensionHandler,
 };
 pub use crate::manager::{
     install_global_managed_asset_pack_download_delegate, DownloadProgress,
@@ -106,16 +105,6 @@ fn parse_update_check_response(value: String) -> Result<UpdateCheck, BackgroundA
     })
 }
 
-fn parse_bool_response(value: String) -> Result<bool, BackgroundAssetsError> {
-    match value.as_str() {
-        "1" | "true" | "TRUE" | "yes" | "ok" => Ok(true),
-        "0" | "false" | "FALSE" | "no" => Ok(false),
-        other => Err(BackgroundAssetsError::message(format!(
-            "invalid exclusive-control payload: {other}"
-        ))),
-    }
-}
-
 fn asset_pack_from_raw(OpaquePtr(ptr): OpaquePtr) -> Result<AssetPack, BackgroundAssetsError> {
     AssetPack::from_raw(ptr)
         .ok_or_else(|| BackgroundAssetsError::message("asset-pack pointer must not be null"))
@@ -128,7 +117,7 @@ fn poll_object_future<T>(
 ) -> Poll<Result<T, BackgroundAssetsError>> {
     Pin::new(inner).poll(cx).map(|result| {
         result
-            .map_err(BackgroundAssetsError::message)
+            .map_err(BackgroundAssetsError::from_json_str)
             .and_then(map_ok)
     })
 }
@@ -143,7 +132,7 @@ where
 {
     Pin::new(inner).poll(cx).map(|result| {
         result
-            .map_err(BackgroundAssetsError::message)
+            .map_err(BackgroundAssetsError::from_json_str)
             .and_then(map_ok)
     })
 }
@@ -312,32 +301,13 @@ impl Future for CurrentDownloadsFuture {
     }
 }
 
-pub struct ExclusiveControlFuture {
-    inner: AsyncCompletionFuture<String>,
-}
-
-impl fmt::Debug for ExclusiveControlFuture {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ExclusiveControlFuture")
-            .finish_non_exhaustive()
-    }
-}
-
-impl Future for ExclusiveControlFuture {
-    type Output = Result<bool, BackgroundAssetsError>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        poll_string_future(&mut self.inner, cx, parse_bool_response)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct AsyncAssetPackManager {
     inner: AssetPackManager,
 }
 
 impl AsyncAssetPackManager {
-    pub fn shared() -> Option<Self> {
+    pub fn shared() -> Result<Self, BackgroundAssetsError> {
         AssetPackManager::shared().map(Self::new)
     }
 
@@ -488,7 +458,7 @@ pub struct AsyncDownloadManager {
 }
 
 impl AsyncDownloadManager {
-    pub fn shared() -> Option<Self> {
+    pub fn shared() -> Result<Self, BackgroundAssetsError> {
         DownloadManager::shared().map(Self::new)
     }
 
@@ -516,36 +486,22 @@ impl AsyncDownloadManager {
         CurrentDownloadsFuture { inner: future }
     }
 
-    pub fn with_exclusive_control(&self, before: Option<SystemTime>) -> ExclusiveControlFuture {
-        let (future, ctx) = AsyncCompletion::create();
-        let (seconds, has_before) = before.map_or((0.0, false), |timestamp| {
-            let duration = timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
-            (duration.as_secs_f64(), true)
-        });
-        unsafe {
-            ffi::ba_download_manager_with_exclusive_control_async(
-                self.inner.raw_ptr(),
-                seconds,
-                has_before,
-                ctx,
-                string_async_cb,
-            );
-        }
-        ExclusiveControlFuture { inner: future }
+    pub fn with_exclusive_control<F, R>(
+        &self,
+        before: Option<SystemTime>,
+        body: F,
+    ) -> ExclusiveControlFuture<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.inner.with_exclusive_control(before, body)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_bool_response, parse_status_response, parse_update_check_response};
-
-    #[test]
-    fn parse_bool_response_accepts_expected_values() {
-        assert!(parse_bool_response("true".into()).unwrap());
-        assert!(parse_bool_response("1".into()).unwrap());
-        assert!(!parse_bool_response("false".into()).unwrap());
-        assert!(!parse_bool_response("0".into()).unwrap());
-    }
+    use super::{parse_status_response, parse_update_check_response};
 
     #[test]
     fn parse_status_response_rejects_invalid_payloads() {

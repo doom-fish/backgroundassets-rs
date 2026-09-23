@@ -1,4 +1,5 @@
 import BackgroundAssets
+import BackgroundAssetsObjCBridge
 import Foundation
 
 // swiftlint:disable function_parameter_count identifier_name
@@ -29,13 +30,13 @@ public func ba_download_priority(_ ptr: UnsafeMutableRawPointer?) -> Int {
 
 @_cdecl("ba_download_is_essential")
 public func ba_download_is_essential(_ ptr: UnsafeMutableRawPointer?) -> Bool {
-    guard let ptr else { return false }
+    guard let ptr, #available(macOS 13.3, *) else { return false }
     return download(from: ptr).isEssential
 }
 
 @_cdecl("ba_download_removing_essential")
 public func ba_download_removing_essential(_ ptr: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
-    guard let ptr else { return nil }
+    guard let ptr, #available(macOS 13.3, *) else { return nil }
     return retained(download(from: ptr).removingEssential())
 }
 
@@ -78,6 +79,14 @@ public func ba_url_download_create(
         writeErrorOut(errorOut, "identifier, URL, and app-group identifier are required")
         return nil
     }
+    guard #available(macOS 13.3, *) else {
+        writeErrorOut(errorOut, "BAURLDownload requires macOS 13.3 or newer")
+        return nil
+    }
+    guard let fileSize = Int(exactly: fileSize), fileSize > 0 else {
+        writeErrorOut(errorOut, "BAURLDownload file size must be between 1 and Int.max")
+        return nil
+    }
 
     guard let url = URL(string: String(cString: rawURL)) else {
         writeErrorOut(errorOut, "invalid URL for BAURLDownload")
@@ -99,20 +108,35 @@ public func ba_url_download_create(
         }
     }
 
-    let download = BAURLDownload(
-        identifier: String(cString: identifier),
-        request: request,
-        essential: essential,
-        fileSize: Int(fileSize),
-        applicationGroupIdentifier: String(cString: appGroupID),
-        priority: BADownload.Priority(rawValue: priority)
-    )
+    var error: NSError?
+    guard let download = BAXTryMakeURLDownload(
+        String(cString: identifier),
+        request,
+        essential,
+        UInt(bitPattern: fileSize),
+        String(cString: appGroupID),
+        BADownload.Priority(rawValue: priority),
+        &error
+    ) else {
+        if let error {
+            writeErrorOut(errorOut, error)
+        } else {
+            writeErrorOut(errorOut, "BAURLDownload could not be created")
+        }
+        return nil
+    }
     return retained(download)
 }
 
 @_cdecl("ba_download_manager_shared")
-public func ba_download_manager_shared() -> UnsafeMutableRawPointer? {
-    retained(BADownloadManager.shared)
+public func ba_download_manager_shared(
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> UnsafeMutableRawPointer? {
+    if let reason = downloadManagerUnavailableReason {
+        writeErrorOut(errorOut, reason)
+        return nil
+    }
+    return retained(BADownloadManager.shared)
 }
 
 @_cdecl("ba_download_manager_schedule_download")
@@ -126,8 +150,14 @@ public func ba_download_manager_schedule_download(
         return false
     }
 
+    let download = download(from: downloadPtr)
+    if let reason = downloadSchedulingRejection(download, operation: "schedule_download") {
+        writeErrorOut(errorOut, reason)
+        return false
+    }
+
     do {
-        try downloadManager(from: managerPtr).scheduleDownload(download(from: downloadPtr))
+        try downloadManager(from: managerPtr).scheduleDownload(download)
         return true
     } catch {
         writeErrorOut(errorOut, error)
@@ -146,8 +176,14 @@ public func ba_download_manager_start_foreground_download(
         return false
     }
 
+    let download = download(from: downloadPtr)
+    if let reason = downloadSchedulingRejection(download, operation: "start_foreground_download") {
+        writeErrorOut(errorOut, reason)
+        return false
+    }
+
     do {
-        try downloadManager(from: managerPtr).startForegroundDownload(download(from: downloadPtr))
+        try downloadManager(from: managerPtr).startForegroundDownload(download)
         return true
     } catch {
         writeErrorOut(errorOut, error)
@@ -197,27 +233,21 @@ public func ba_download_manager_fetch_current_downloads_async(
     }
 }
 
-@_cdecl("ba_download_manager_with_exclusive_control_async")
-public func ba_download_manager_with_exclusive_control_async(
+@_cdecl("ba_download_manager_with_exclusive_control")
+public func ba_download_manager_with_exclusive_control(
     _ managerPtr: UnsafeMutableRawPointer?,
     _ beforeEpochSeconds: Double,
     _ hasBeforeDate: Bool,
-    _ ctx: UnsafeMutableRawPointer?,
-    _ cb: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
+    _ job: UnsafeMutableRawPointer?,
+    _ cb: @escaping @convention(c) (UnsafeMutableRawPointer?, Bool, UnsafePointer<CChar>?) -> Void
 ) {
-    guard let managerPtr else {
-        messageErrorString("download manager pointer must not be null").withCString { cb(nil, $0, ctx) }
-        return
-    }
+    guard let job else { return }
+    let exclusiveControlJob = ExclusiveControlJob(callback: cb, job: job)
+    guard let managerPtr else { return }
 
     let manager = downloadManager(from: managerPtr)
-    let callbackBox = AsyncCallbackBox(callback: cb, context: ctx)
     let handler: @Sendable (Bool, Error?) -> Void = { acquiredLock, error in
-        if let error {
-            callbackBox.fail(error: error)
-        } else {
-            callbackBox.succeed(string: acquiredLock ? "true" : "false")
-        }
+        exclusiveControlJob.run(acquiredLock: acquiredLock, error: error)
     }
 
     if hasBeforeDate {

@@ -6,9 +6,12 @@ use backgroundassets::DownloadStatusUpdate;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pollster::block_on(async {
-        let Some(manager) = AsyncAssetPackManager::shared() else {
-            println!("BackgroundAssets unavailable on this system.");
-            return Ok::<(), backgroundassets::BackgroundAssetsError>(());
+        let manager = match AsyncAssetPackManager::shared() {
+            Ok(manager) => manager,
+            Err(error) => {
+                println!("Managed asset packs are unavailable: {error}");
+                return Ok::<(), backgroundassets::BackgroundAssetsError>(());
+            }
         };
 
         let pack = if let Some(asset_pack_id) = env::args().nth(1) {
@@ -52,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join()
             .expect("ensure_local_availability thread panicked")?;
 
-        if let Some(download_manager) = AsyncDownloadManager::shared() {
+        if let Ok(download_manager) = AsyncDownloadManager::shared() {
             let downloads = download_manager.current_downloads().await?;
             println!("current downloads after request: {}", downloads.len());
         }

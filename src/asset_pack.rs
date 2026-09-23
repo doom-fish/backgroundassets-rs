@@ -105,7 +105,7 @@ impl AssetPack {
 
     pub fn user_info(&self) -> Option<Vec<u8>> {
         let mut length = 0isize;
-        let ptr = unsafe { ffi::ba_asset_pack_user_info_copy(self.ptr, &mut length) };
+        let ptr = unsafe { ffi::ba_asset_pack_user_info_copy(self.ptr, &raw mut length) };
         (!ptr.is_null()).then(|| unsafe { ffi::owned_bytes(ptr, length) })
     }
 

@@ -4,27 +4,23 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::fmt;
 use std::ptr;
-#[cfg(feature = "async")]
-use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "async")]
-use doom_fish_utils::panic_safe::catch_user_panic;
-#[cfg(feature = "async")]
-use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream};
+use doom_fish_utils::stream::BoundedAsyncStream;
 use serde::{Deserialize, Serialize};
 
 use crate::asset_pack::AssetPackSnapshot;
-#[cfg(feature = "async")]
-use crate::download::{
-    register_download_manager_delegate, DownloadManagerDelegate, DownloadManagerEventStream,
-};
 use crate::download::{ContentRequest, Download, DownloadSnapshot};
 use crate::error::BackgroundAssetsError;
 use crate::ffi;
+#[cfg(feature = "async")]
+use crate::handler::{HandlerState, Registry};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppExtensionInfoSnapshot {
+    #[serde(alias = "restrictedDownloadSizeRemaining")]
     pub restricted_download_size_remaining: Option<i64>,
+    #[serde(alias = "restrictedEssentialDownloadSizeRemaining")]
     pub restricted_essential_download_size_remaining: Option<i64>,
 }
 
@@ -100,17 +96,17 @@ pub enum ChallengeDisposition {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthenticationChallenge {
     pub host: String,
+    #[serde(alias = "authenticationMethod")]
     pub authentication_method: String,
+    #[serde(alias = "previousFailureCount")]
     pub previous_failure_count: i64,
+    #[serde(alias = "proposedCredentialUser")]
     pub proposed_credential_user: Option<String>,
+    #[serde(alias = "proposedCredentialHasPassword")]
     pub proposed_credential_has_password: bool,
 }
 
 pub trait DownloaderExtensionHandler: Send + 'static {
-    fn should_download_asset_pack(&mut self, _asset_pack: &AssetPackSnapshot) -> bool {
-        true
-    }
-
     fn downloads(
         &mut self,
         request: ContentRequest,
@@ -131,6 +127,20 @@ pub trait DownloaderExtensionHandler: Send + 'static {
     fn download_finished(&mut self, _download: &Download, _file_url: &str) {}
 
     fn extension_will_terminate(&mut self) {}
+}
+
+pub trait ManagedDownloaderExtensionHandler: Send + 'static {
+    fn should_download_asset_pack(&mut self, _asset_pack: &AssetPackSnapshot) -> bool {
+        true
+    }
+
+    fn did_receive_challenge(
+        &mut self,
+        _download: &Download,
+        _challenge: &AuthenticationChallenge,
+    ) -> ChallengeDisposition {
+        ChallengeDisposition::PerformDefaultHandling
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -170,6 +180,8 @@ pub enum ExtensionEvent {
 #[cfg(feature = "async")]
 pub struct ExtensionEventStream {
     inner: BoundedAsyncStream<ExtensionEvent>,
+    registration_id: u64,
+    unregister: fn(u64),
 }
 
 #[cfg(feature = "async")]
@@ -202,128 +214,51 @@ impl fmt::Debug for ExtensionEventStream {
 }
 
 #[cfg(feature = "async")]
-pub struct ManagedDownloaderExtensionConfiguration<D> {
-    download_manager_delegate: D,
-    extension_event_capacity: usize,
-    download_manager_event_capacity: usize,
-}
-
-#[cfg(feature = "async")]
-impl<D> ManagedDownloaderExtensionConfiguration<D> {
-    pub fn new(download_manager_delegate: D) -> Self {
-        Self {
-            download_manager_delegate,
-            extension_event_capacity: 16,
-            download_manager_event_capacity: 16,
-        }
-    }
-
-    pub fn extension_event_capacity(mut self, capacity: usize) -> Self {
-        self.extension_event_capacity = capacity.max(1);
-        self
-    }
-
-    pub fn download_manager_event_capacity(mut self, capacity: usize) -> Self {
-        self.download_manager_event_capacity = capacity.max(1);
-        self
+impl Drop for ExtensionEventStream {
+    fn drop(&mut self) {
+        (self.unregister)(self.registration_id);
     }
 }
 
 #[cfg(feature = "async")]
-impl<D> fmt::Debug for ManagedDownloaderExtensionConfiguration<D> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ManagedDownloaderExtensionConfiguration")
-            .field("extension_event_capacity", &self.extension_event_capacity)
-            .field(
-                "download_manager_event_capacity",
-                &self.download_manager_event_capacity,
-            )
-            .finish_non_exhaustive()
-    }
-}
+static EXTENSION: Registry<dyn DownloaderExtensionHandler, ExtensionEvent> = Registry::new();
 
 #[cfg(feature = "async")]
-pub struct ManagedDownloaderExtensionRegistration {
-    extension_events: ExtensionEventStream,
-    download_manager_events: DownloadManagerEventStream,
-}
+static MANAGED_EXTENSION: Registry<dyn ManagedDownloaderExtensionHandler, ExtensionEvent> =
+    Registry::new();
 
 #[cfg(feature = "async")]
-impl ManagedDownloaderExtensionRegistration {
-    pub fn extension_events(&self) -> &ExtensionEventStream {
-        &self.extension_events
-    }
-
-    pub fn download_manager_events(&self) -> &DownloadManagerEventStream {
-        &self.download_manager_events
-    }
-
-    pub fn into_parts(self) -> (ExtensionEventStream, DownloadManagerEventStream) {
-        (self.extension_events, self.download_manager_events)
-    }
-}
-
-#[cfg(feature = "async")]
-impl fmt::Debug for ManagedDownloaderExtensionRegistration {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ManagedDownloaderExtensionRegistration")
-            .field("extension_events", &self.extension_events)
-            .field("download_manager_events", &self.download_manager_events)
-            .finish()
-    }
-}
-
-#[cfg(feature = "async")]
-struct ExtensionState {
-    handler: Box<dyn DownloaderExtensionHandler>,
-    sender: AsyncStreamSender<ExtensionEvent>,
-}
-
-#[cfg(feature = "async")]
-fn extension_state() -> &'static Mutex<Option<ExtensionState>> {
-    static STATE: OnceLock<Mutex<Option<ExtensionState>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(None))
-}
-
-#[cfg(feature = "async")]
+#[must_use = "dropping the stream unregisters the handler"]
 pub fn install_global_downloader_extension<H>(handler: H, capacity: usize) -> ExtensionEventStream
 where
     H: DownloaderExtensionHandler,
 {
     let (stream, sender) = BoundedAsyncStream::new(capacity.max(1));
-    if let Ok(mut state) = extension_state().lock() {
-        *state = Some(ExtensionState {
-            handler: Box::new(handler),
-            sender,
-        });
+    let handler: Box<dyn DownloaderExtensionHandler> = Box::new(handler);
+    let registration_id = EXTENSION.install(HandlerState::new(handler, sender));
+    ExtensionEventStream {
+        inner: stream,
+        registration_id,
+        unregister: |id| EXTENSION.remove(id),
     }
-    ExtensionEventStream { inner: stream }
 }
 
 #[cfg(feature = "async")]
-pub fn install_global_managed_downloader_extension<H, D>(
+#[must_use = "dropping the stream unregisters the handler"]
+pub fn install_global_managed_downloader_extension<H>(
     handler: H,
-    configuration: ManagedDownloaderExtensionConfiguration<D>,
-) -> ManagedDownloaderExtensionRegistration
+    capacity: usize,
+) -> ExtensionEventStream
 where
-    H: DownloaderExtensionHandler,
-    D: DownloadManagerDelegate,
+    H: ManagedDownloaderExtensionHandler,
 {
-    let ManagedDownloaderExtensionConfiguration {
-        download_manager_delegate,
-        extension_event_capacity,
-        download_manager_event_capacity,
-    } = configuration;
-
-    let extension_events = install_global_downloader_extension(handler, extension_event_capacity);
-    let download_manager_events = register_download_manager_delegate(
-        download_manager_delegate,
-        download_manager_event_capacity,
-    );
-
-    ManagedDownloaderExtensionRegistration {
-        extension_events,
-        download_manager_events,
+    let (stream, sender) = BoundedAsyncStream::new(capacity.max(1));
+    let handler: Box<dyn ManagedDownloaderExtensionHandler> = Box::new(handler);
+    let registration_id = MANAGED_EXTENSION.install(HandlerState::new(handler, sender));
+    ExtensionEventStream {
+        inner: stream,
+        registration_id,
+        unregister: |id| MANAGED_EXTENSION.remove(id),
     }
 }
 
@@ -338,11 +273,19 @@ fn string_from_ptr(ptr: *const c_char) -> String {
     }
 }
 
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 fn json_cstring<T: Serialize>(value: &T) -> *mut c_char {
     serde_json::to_string(value)
         .ok()
         .and_then(|json| CString::new(json).ok())
         .map_or(ptr::null_mut(), CString::into_raw)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ba_rust_string_free(string: *mut c_char) {
+    if !string.is_null() {
+        drop(unsafe { CString::from_raw(string) });
+    }
 }
 
 #[derive(Deserialize)]
@@ -365,6 +308,7 @@ impl From<AssetPackSnapshotPayload> for AssetPackSnapshot {
     }
 }
 
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 fn asset_pack_snapshot_from_json(json: &str) -> Option<AssetPackSnapshot> {
     serde_json::from_str::<AssetPackSnapshotPayload>(json)
         .ok()
@@ -372,7 +316,7 @@ fn asset_pack_snapshot_from_json(json: &str) -> Option<AssetPackSnapshot> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ba_rust_extension_should_download_asset_pack(
+pub unsafe extern "C" fn ba_rust_managed_extension_should_download_asset_pack(
     asset_pack_json: *const c_char,
 ) -> bool {
     #[cfg(not(feature = "async"))]
@@ -387,16 +331,15 @@ pub unsafe extern "C" fn ba_rust_extension_should_download_asset_pack(
         else {
             return true;
         };
-        let Ok(mut state_guard) = extension_state().lock() else {
+        let Some(state) = MANAGED_EXTENSION.current() else {
             return true;
         };
-        let Some(state) = state_guard.as_mut() else {
-            return true;
-        };
-        let mut should_download = true;
-        catch_user_panic("ba_rust_extension_should_download_asset_pack", || {
-            should_download = state.handler.should_download_asset_pack(&asset_pack);
-        });
+        let should_download = state
+            .call(
+                "ManagedDownloaderExtensionHandler::should_download_asset_pack",
+                |handler| handler.should_download_asset_pack(&asset_pack),
+            )
+            .unwrap_or(true);
         state.sender.push(ExtensionEvent::ShouldDownloadAssetPack {
             asset_pack,
             should_download,
@@ -406,46 +349,92 @@ pub unsafe extern "C" fn ba_rust_extension_should_download_asset_pack(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn ba_rust_managed_extension_challenge_disposition(
+    download: *mut c_void,
+    challenge_json: *const c_char,
+) -> i32 {
+    #[cfg(not(feature = "async"))]
+    {
+        let _ = (download, challenge_json);
+        ChallengeDisposition::PerformDefaultHandling as i32
+    }
+
+    #[cfg(feature = "async")]
+    {
+        let Some(download) = (unsafe { Download::retained_from_borrowed(download) }) else {
+            return ChallengeDisposition::PerformDefaultHandling as i32;
+        };
+        let challenge =
+            serde_json::from_str::<AuthenticationChallenge>(&string_from_ptr(challenge_json))
+                .unwrap_or_default();
+        let Some(state) = MANAGED_EXTENSION.current() else {
+            return ChallengeDisposition::PerformDefaultHandling as i32;
+        };
+        let disposition = state
+            .call(
+                "ManagedDownloaderExtensionHandler::did_receive_challenge",
+                |handler| handler.did_receive_challenge(&download, &challenge),
+            )
+            .unwrap_or_default();
+        state.sender.push(ExtensionEvent::ChallengeRequested {
+            download: download.snapshot(),
+            challenge,
+            disposition,
+        });
+        disposition as i32
+    }
+}
+
+#[cfg(feature = "async")]
+fn check_download_plan(
+    request: ContentRequest,
+    downloads: &[Download],
+) -> Result<(), BackgroundAssetsError> {
+    if request == ContentRequest::Periodic && downloads.iter().any(Download::is_essential) {
+        return Err(BackgroundAssetsError::invalid_argument(
+            "essential downloads are only allowed for install and update content requests",
+        ));
+    }
+    Ok(())
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn ba_rust_extension_downloads_for_request(
-    request: i32,
+    request: isize,
     manifest_url: *const c_char,
     extension_info: *mut c_void,
 ) -> *mut c_char {
     #[cfg(not(feature = "async"))]
     {
-        let _ = request;
-        let _ = manifest_url;
-        let _ = extension_info;
-        json_cstring(&Vec::<u64>::new())
+        let _ = (request, manifest_url, extension_info);
+        ptr::null_mut()
     }
 
     #[cfg(feature = "async")]
     {
-        let request = ContentRequest::from_raw(request as isize).unwrap_or(ContentRequest::Install);
+        let request = ContentRequest::from_raw(request).unwrap_or(ContentRequest::Install);
         let manifest_url = string_from_ptr(manifest_url);
         let Some(extension_info) =
             (unsafe { AppExtensionInfo::retained_from_borrowed(extension_info) })
         else {
-            return json_cstring(&Vec::<u64>::new());
+            return ptr::null_mut();
+        };
+        let Some(state) = EXTENSION.current() else {
+            return ptr::null_mut();
         };
 
-        let Ok(mut state_guard) = extension_state().lock() else {
-            return json_cstring(&Vec::<u64>::new());
-        };
-        let Some(state) = state_guard.as_mut() else {
-            return json_cstring(&Vec::<u64>::new());
-        };
+        let planned = state
+            .call("DownloaderExtensionHandler::downloads", |handler| {
+                handler.downloads(request, &manifest_url, &extension_info)
+            })
+            .unwrap_or_else(|| {
+                Err(BackgroundAssetsError::message(
+                    "download plan handler panicked across the FFI boundary",
+                ))
+            })
+            .and_then(|downloads| check_download_plan(request, &downloads).map(|()| downloads));
 
-        let mut downloads_result = Err(BackgroundAssetsError::message(
-            "download plan handler panicked across the FFI boundary",
-        ));
-        catch_user_panic("ba_rust_extension_downloads_for_request", || {
-            downloads_result = state
-                .handler
-                .downloads(request, &manifest_url, &extension_info);
-        });
-
-        match downloads_result {
+        match planned {
             Ok(downloads) => {
                 state.sender.push(ExtensionEvent::DownloadsRequested {
                     request,
@@ -468,7 +457,7 @@ pub unsafe extern "C" fn ba_rust_extension_downloads_for_request(
                     manifest_url,
                     error,
                 });
-                json_cstring(&Vec::<u64>::new())
+                ptr::null_mut()
             }
         }
     }
@@ -481,8 +470,7 @@ pub unsafe extern "C" fn ba_rust_extension_challenge_disposition(
 ) -> i32 {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download;
-        let _ = challenge_json;
+        let _ = (download, challenge_json);
         ChallengeDisposition::PerformDefaultHandling as i32
     }
 
@@ -494,16 +482,15 @@ pub unsafe extern "C" fn ba_rust_extension_challenge_disposition(
         let challenge =
             serde_json::from_str::<AuthenticationChallenge>(&string_from_ptr(challenge_json))
                 .unwrap_or_default();
-        let Ok(mut state_guard) = extension_state().lock() else {
+        let Some(state) = EXTENSION.current() else {
             return ChallengeDisposition::PerformDefaultHandling as i32;
         };
-        let Some(state) = state_guard.as_mut() else {
-            return ChallengeDisposition::PerformDefaultHandling as i32;
-        };
-        let mut disposition = ChallengeDisposition::PerformDefaultHandling;
-        catch_user_panic("ba_rust_extension_challenge_disposition", || {
-            disposition = state.handler.did_receive_challenge(&download, &challenge);
-        });
+        let disposition = state
+            .call(
+                "DownloaderExtensionHandler::did_receive_challenge",
+                |handler| handler.did_receive_challenge(&download, &challenge),
+            )
+            .unwrap_or_default();
         state.sender.push(ExtensionEvent::ChallengeRequested {
             download: download.snapshot(),
             challenge,
@@ -520,8 +507,7 @@ pub unsafe extern "C" fn ba_rust_extension_download_failed(
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download;
-        let _ = error_json;
+        let _ = (download, error_json);
     }
 
     #[cfg(feature = "async")]
@@ -529,18 +515,17 @@ pub unsafe extern "C" fn ba_rust_extension_download_failed(
         let Some(download) = (unsafe { Download::retained_from_borrowed(download) }) else {
             return;
         };
-        let error = BackgroundAssetsError::from_json_str(&string_from_ptr(error_json));
-        if let Ok(mut state_guard) = extension_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_extension_download_failed", || {
-                    state.handler.download_failed(&download, &error);
-                });
-                state.sender.push(ExtensionEvent::DownloadFailed {
-                    download: download.snapshot(),
-                    error,
-                });
-            }
-        }
+        let error = BackgroundAssetsError::from_json_str(string_from_ptr(error_json));
+        let Some(state) = EXTENSION.current() else {
+            return;
+        };
+        state.call("DownloaderExtensionHandler::download_failed", |handler| {
+            handler.download_failed(&download, &error);
+        });
+        state.sender.push(ExtensionEvent::DownloadFailed {
+            download: download.snapshot(),
+            error,
+        });
     }
 }
 
@@ -551,8 +536,7 @@ pub unsafe extern "C" fn ba_rust_extension_download_finished(
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = download;
-        let _ = file_url;
+        let _ = (download, file_url);
     }
 
     #[cfg(feature = "async")]
@@ -561,17 +545,16 @@ pub unsafe extern "C" fn ba_rust_extension_download_finished(
             return;
         };
         let file_url = string_from_ptr(file_url);
-        if let Ok(mut state_guard) = extension_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_extension_download_finished", || {
-                    state.handler.download_finished(&download, &file_url);
-                });
-                state.sender.push(ExtensionEvent::DownloadFinished {
-                    download: download.snapshot(),
-                    file_url,
-                });
-            }
-        }
+        let Some(state) = EXTENSION.current() else {
+            return;
+        };
+        state.call("DownloaderExtensionHandler::download_finished", |handler| {
+            handler.download_finished(&download, &file_url);
+        });
+        state.sender.push(ExtensionEvent::DownloadFinished {
+            download: download.snapshot(),
+            file_url,
+        });
     }
 }
 
@@ -579,13 +562,172 @@ pub unsafe extern "C" fn ba_rust_extension_download_finished(
 pub extern "C" fn ba_rust_extension_will_terminate() {
     #[cfg(feature = "async")]
     {
-        if let Ok(mut state_guard) = extension_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_extension_will_terminate", || {
-                    state.handler.extension_will_terminate();
-                });
-                state.sender.push(ExtensionEvent::Terminating);
-            }
+        if let Some(state) = EXTENSION.current() {
+            state.call(
+                "DownloaderExtensionHandler::extension_will_terminate",
+                |handler| {
+                    handler.extension_will_terminate();
+                },
+            );
+            state.sender.push(ExtensionEvent::Terminating);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+
+    use super::{
+        ba_rust_string_free, json_cstring, AppExtensionInfoSnapshot, AuthenticationChallenge,
+    };
+
+    #[test]
+    fn rust_allocated_json_is_freed_by_the_rust_export() {
+        let json = json_cstring(&vec![1_u64, 2, u64::MAX]);
+        assert!(!json.is_null());
+        let text = unsafe { CStr::from_ptr(json) }.to_str().unwrap().to_owned();
+        assert_eq!(text, "[1,2,18446744073709551615]");
+        unsafe { ba_rust_string_free(json) };
+        unsafe { ba_rust_string_free(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn bridge_payloads_decode_the_keys_swift_encodes() {
+        let challenge: AuthenticationChallenge = serde_json::from_str(
+            r#"{"authenticationMethod":"NSURLAuthenticationMethodHTTPBasic","host":"cdn.example.com","previousFailureCount":1,"proposedCredentialHasPassword":false}"#,
+        )
+        .unwrap();
+        assert_eq!(challenge.host, "cdn.example.com");
+        assert_eq!(
+            challenge.authentication_method,
+            "NSURLAuthenticationMethodHTTPBasic"
+        );
+        assert_eq!(challenge.previous_failure_count, 1);
+        assert_eq!(challenge.proposed_credential_user, None);
+
+        let info: AppExtensionInfoSnapshot = serde_json::from_str(
+            r#"{"restrictedDownloadSizeRemaining":4096,"restrictedEssentialDownloadSizeRemaining":1024}"#,
+        )
+        .unwrap();
+        assert_eq!(info.restricted_download_size_remaining, Some(4096));
+        assert_eq!(
+            info.restricted_essential_download_size_remaining,
+            Some(1024)
+        );
+
+        let serialized = serde_json::to_value(&challenge).unwrap();
+        assert_eq!(
+            serialized["authentication_method"],
+            "NSURLAuthenticationMethodHTTPBasic"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+mod async_tests {
+    use std::ffi::CString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::{
+        ba_rust_extension_will_terminate, ba_rust_managed_extension_should_download_asset_pack,
+        install_global_downloader_extension, install_global_managed_downloader_extension,
+        AppExtensionInfo, ExtensionEvent, ManagedDownloaderExtensionHandler,
+    };
+    use crate::asset_pack::AssetPackSnapshot;
+    use crate::download::{ContentRequest, Download};
+    use crate::error::BackgroundAssetsError;
+    use crate::DownloaderExtensionHandler;
+
+    struct Filter {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ManagedDownloaderExtensionHandler for Filter {
+        fn should_download_asset_pack(&mut self, asset_pack: &AssetPackSnapshot) -> bool {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            asset_pack.id != "pack.skip"
+        }
+    }
+
+    #[test]
+    fn managed_extension_handler_is_unregistered_when_its_stream_drops() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let events = install_global_managed_downloader_extension(
+            Filter {
+                calls: Arc::clone(&calls),
+            },
+            4,
+        );
+        let skip =
+            CString::new(r#"{"description":"Skip","downloadSize":1,"id":"pack.skip","version":1}"#)
+                .unwrap();
+
+        assert!(!unsafe { ba_rust_managed_extension_should_download_asset_pack(skip.as_ptr()) });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            events.try_next(),
+            Some(ExtensionEvent::ShouldDownloadAssetPack { asset_pack, should_download: false })
+                if asset_pack.id == "pack.skip"
+        ));
+
+        drop(events);
+        assert!(unsafe { ba_rust_managed_extension_should_download_asset_pack(skip.as_ptr()) });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct Terminator {
+        terminations: Arc<AtomicUsize>,
+    }
+
+    impl DownloaderExtensionHandler for Terminator {
+        fn downloads(
+            &mut self,
+            _request: ContentRequest,
+            _manifest_url: &str,
+            _extension_info: &AppExtensionInfo,
+        ) -> Result<Vec<Download>, BackgroundAssetsError> {
+            Ok(Vec::new())
+        }
+
+        fn extension_will_terminate(&mut self) {
+            self.terminations.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn replacing_the_extension_handler_closes_the_previous_stream() {
+        let first_count = Arc::new(AtomicUsize::new(0));
+        let second_count = Arc::new(AtomicUsize::new(0));
+        let first = install_global_downloader_extension(
+            Terminator {
+                terminations: Arc::clone(&first_count),
+            },
+            4,
+        );
+        let second = install_global_downloader_extension(
+            Terminator {
+                terminations: Arc::clone(&second_count),
+            },
+            4,
+        );
+        assert!(first.is_closed());
+
+        ba_rust_extension_will_terminate();
+        assert_eq!(first_count.load(Ordering::SeqCst), 0);
+        assert_eq!(second_count.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            second.try_next(),
+            Some(ExtensionEvent::Terminating)
+        ));
+
+        drop(first);
+        ba_rust_extension_will_terminate();
+        assert_eq!(second_count.load(Ordering::SeqCst), 2);
+
+        drop(second);
+        ba_rust_extension_will_terminate();
+        assert_eq!(second_count.load(Ordering::SeqCst), 2);
     }
 }

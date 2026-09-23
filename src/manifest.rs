@@ -17,7 +17,7 @@ impl Manifest {
         let app_group_id = ffi::required_cstring(app_group_id, "app_group_id")?;
         let mut error: *mut c_char = ptr::null_mut();
         let ptr = unsafe {
-            ffi::ba_manifest_create_from_url(url.as_ptr(), app_group_id.as_ptr(), &mut error)
+            ffi::ba_manifest_create_from_url(url.as_ptr(), app_group_id.as_ptr(), &raw mut error)
         };
         if ptr.is_null() {
             return Err(BackgroundAssetsError::from_owned_json_ptr(error));
@@ -36,7 +36,7 @@ impl Manifest {
                 bytes.as_ptr(),
                 length,
                 app_group_id.as_ptr(),
-                &mut error,
+                &raw mut error,
             )
         };
         if ptr.is_null() {

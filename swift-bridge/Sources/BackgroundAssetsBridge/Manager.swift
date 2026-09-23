@@ -5,11 +5,18 @@ import System
 // swiftlint:disable identifier_name
 
 @_cdecl("ba_asset_pack_manager_shared")
-public func ba_asset_pack_manager_shared() -> UnsafeMutableRawPointer? {
-    if #available(macOS 26.0, *) {
-        return retained(ManagerBox(AssetPackManager.shared))
+public func ba_asset_pack_manager_shared(
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> UnsafeMutableRawPointer? {
+    if let reason = assetPackManagerUnavailableReason {
+        writeErrorOut(errorOut, reason)
+        return nil
     }
-    return nil
+    guard #available(macOS 26.0, *) else {
+        writeErrorOut(errorOut, unavailableMessage)
+        return nil
+    }
+    return retained(ManagerBox(AssetPackManager.shared))
 }
 
 @_cdecl("ba_asset_pack_manager_asset_pack_is_available_locally")
@@ -126,7 +133,7 @@ public func ba_asset_pack_manager_all_asset_packs_async(
             }
         }
     } else {
-        unavailableMessage.withCString { cb(nil, $0, ctx) }
+        messageErrorString(unavailableMessage).withCString { cb(nil, $0, ctx) }
     }
 }
 
@@ -156,7 +163,7 @@ public func ba_asset_pack_manager_asset_pack_async(
             }
         }
     } else {
-        unavailableMessage.withCString { cb(nil, $0, ctx) }
+        messageErrorString(unavailableMessage).withCString { cb(nil, $0, ctx) }
     }
 }
 
@@ -230,7 +237,7 @@ public func ba_asset_pack_manager_ensure_local_availability_async(
         return
     }
     guard #available(macOS 26.0, *) else {
-        unavailableMessage.withCString { cb(nil, $0, ctx) }
+        messageErrorString(unavailableMessage).withCString { cb(nil, $0, ctx) }
         return
     }
 
@@ -271,7 +278,7 @@ public func ba_asset_pack_manager_check_for_updates_async(
         return
     }
     guard #available(macOS 26.0, *) else {
-        unavailableMessage.withCString { cb(nil, $0, ctx) }
+        messageErrorString(unavailableMessage).withCString { cb(nil, $0, ctx) }
         return
     }
 
@@ -305,7 +312,7 @@ public func ba_asset_pack_manager_remove_async(
         return
     }
     guard #available(macOS 26.0, *) else {
-        unavailableMessage.withCString { cb(nil, $0, ctx) }
+        messageErrorString(unavailableMessage).withCString { cb(nil, $0, ctx) }
         return
     }
 
@@ -322,25 +329,36 @@ public func ba_asset_pack_manager_remove_async(
     }
 }
 
+@available(macOS 26.0, *)
+private func statusUpdateJSON(_ update: AssetPackManager.DownloadStatusUpdate) -> String? {
+    guard let payload = statusUpdatePayload(update) else { return nil }
+    return try? bridgeJSON(payload)
+}
+
 @_cdecl("ba_asset_pack_manager_status_updates_stream_create")
 public func ba_asset_pack_manager_status_updates_stream_create(
     _ ptr: UnsafeMutableRawPointer?,
     _ assetPackID: UnsafePointer<CChar>?,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<CChar>?, Bool) -> Void
+    _ retain: ContextReferenceCallback,
+    _ release: @escaping ContextReferenceCallback,
+    _ cb: @escaping @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Bool) -> Void
 ) -> UnsafeMutableRawPointer? {
-    guard let ptr else { return nil }
+    guard let ptr, let ctx else { return nil }
     guard #available(macOS 26.0, *) else { return nil }
 
     let manager = manager(from: ptr)
     let assetPackIdentifier = assetPackID.map { String(cString: $0) }
-    let callbackBox = StreamCallbackBox(callback: cb, context: ctx)
+    let callbackBox = StreamCallbackBox(
+        callback: cb,
+        context: RustContext(ctx, retain: retain, release: release)
+    )
 
     let task = Task.detached {
         if let assetPackIdentifier {
             for await update in manager.statusUpdates(forAssetPackWithID: assetPackIdentifier) {
                 if Task.isCancelled { break }
-                if let json = try? bridgeJSON(statusUpdatePayload(update)) {
+                if let json = statusUpdateJSON(update) {
                     callbackBox.push(json: json)
                 }
             }
@@ -348,7 +366,7 @@ public func ba_asset_pack_manager_status_updates_stream_create(
             let updates = await manager.statusUpdates
             for await update in updates {
                 if Task.isCancelled { break }
-                if let json = try? bridgeJSON(statusUpdatePayload(update)) {
+                if let json = statusUpdateJSON(update) {
                     callbackBox.push(json: json)
                 }
             }

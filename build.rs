@@ -15,6 +15,7 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=BackgroundAssets");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=ExtensionFoundation");
+    println!("cargo:rustc-link-lib=framework=Security");
 
     let swift_dir = "swift-bridge";
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR is always set by Cargo");

@@ -152,7 +152,8 @@ impl BackgroundAssetsError {
         Self::invalid_argument(message)
     }
 
-    pub(crate) fn from_json_str(json: &str) -> Self {
+    pub(crate) fn from_json_str(json: impl AsRef<str>) -> Self {
+        let json = json.as_ref();
         serde_json::from_str::<BridgeErrorPayload>(json).map_or_else(
             |_| Self {
                 domain: default_bridge_domain(),

@@ -2,9 +2,12 @@ use backgroundassets::AssetPackManager;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pollster::block_on(async {
-        let Some(manager) = AssetPackManager::shared() else {
-            println!("BackgroundAssets unavailable on this system.");
-            return Ok::<(), backgroundassets::BackgroundAssetsError>(());
+        let manager = match AssetPackManager::shared() {
+            Ok(manager) => manager,
+            Err(error) => {
+                println!("Managed asset packs are unavailable: {error}");
+                return Ok::<(), backgroundassets::BackgroundAssetsError>(());
+            }
         };
 
         let packs = manager.all_asset_packs().await?;

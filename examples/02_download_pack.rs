@@ -5,9 +5,12 @@ use backgroundassets::{AssetPackManager, DownloadStatusUpdate};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pollster::block_on(async {
-        let Some(manager) = AssetPackManager::shared() else {
-            println!("BackgroundAssets unavailable on this system.");
-            return Ok::<(), backgroundassets::BackgroundAssetsError>(());
+        let manager = match AssetPackManager::shared() {
+            Ok(manager) => manager,
+            Err(error) => {
+                println!("Managed asset packs are unavailable: {error}");
+                return Ok::<(), backgroundassets::BackgroundAssetsError>(());
+            }
         };
 
         let pack = if let Some(asset_pack_id) = env::args().nth(1) {

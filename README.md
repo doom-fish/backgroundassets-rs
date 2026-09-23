@@ -16,7 +16,7 @@ use backgroundassets::AssetPackStatus;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pollster::block_on(async {
-        let Some(manager) = AsyncAssetPackManager::shared() else {
+        let Ok(manager) = AsyncAssetPackManager::shared() else {
             return Ok(());
         };
         let packs = manager.all_asset_packs().await?;

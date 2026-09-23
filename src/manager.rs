@@ -5,16 +5,14 @@ use std::ptr;
 #[cfg(feature = "async")]
 use std::ffi::CStr;
 #[cfg(feature = "async")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "async")]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "async")]
-use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion};
+use doom_fish_utils::callback_context::CallbackContext;
 #[cfg(feature = "async")]
-use doom_fish_utils::panic_safe::catch_user_panic;
+use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion};
 #[cfg(feature = "async")]
 use doom_fish_utils::stream::{AsyncStreamSender, BoundedAsyncStream};
 
@@ -23,6 +21,8 @@ use crate::asset_pack::AssetPackSnapshot;
 use crate::asset_pack::{collect_asset_packs, AssetPack, AssetPackStatus};
 use crate::error::{BackgroundAssetsError, BridgeErrorPayload};
 use crate::ffi;
+#[cfg(feature = "async")]
+use crate::handler::HandlerState;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DownloadProgress {
@@ -89,12 +89,13 @@ pub struct AssetPackManager {
 }
 
 impl AssetPackManager {
-    pub fn shared() -> Option<Self> {
-        Self::from_raw(unsafe { ffi::ba_asset_pack_manager_shared() })
-    }
-
-    fn from_raw(ptr: *mut c_void) -> Option<Self> {
-        (!ptr.is_null()).then_some(Self { ptr })
+    pub fn shared() -> Result<Self, BackgroundAssetsError> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let ptr = unsafe { ffi::ba_asset_pack_manager_shared(&raw mut error) };
+        if ptr.is_null() {
+            return Err(BackgroundAssetsError::from_owned_json_ptr(error));
+        }
+        Ok(Self { ptr })
     }
 
     #[cfg(feature = "async")]
@@ -129,8 +130,8 @@ impl AssetPackManager {
                 asset_pack_id_cstr
                     .as_ref()
                     .map_or(ptr::null(), |value| value.as_ptr()),
-                &mut length,
-                &mut error,
+                &raw mut length,
+                &raw mut error,
             )
         };
         if !error.is_null() {
@@ -156,7 +157,7 @@ impl AssetPackManager {
                 asset_pack_id_cstr
                     .as_ref()
                     .map_or(ptr::null(), |value| value.as_ptr()),
-                &mut error,
+                &raw mut error,
             )
         };
         if !error.is_null() {
@@ -168,7 +169,8 @@ impl AssetPackManager {
     pub fn url(&self, path: &str) -> Result<String, BackgroundAssetsError> {
         let path = ffi::required_cstring(path, "path")?;
         let mut error: *mut c_char = ptr::null_mut();
-        let url = unsafe { ffi::ba_asset_pack_manager_url(self.ptr, path.as_ptr(), &mut error) };
+        let url =
+            unsafe { ffi::ba_asset_pack_manager_url(self.ptr, path.as_ptr(), &raw mut error) };
         if !error.is_null() {
             return Err(BackgroundAssetsError::from_owned_json_ptr(error));
         }
@@ -179,7 +181,7 @@ impl AssetPackManager {
     pub async fn all_asset_packs(&self) -> Result<Vec<AssetPack>, BackgroundAssetsError> {
         let (future, ctx) = AsyncCompletion::<OpaquePtr>::create();
         unsafe { ffi::ba_asset_pack_manager_all_asset_packs_async(self.ptr, ctx, object_async_cb) };
-        let OpaquePtr(ptr) = future.await.map_err(BackgroundAssetsError::message)?;
+        let OpaquePtr(ptr) = future.await.map_err(BackgroundAssetsError::from_json_str)?;
         Ok(collect_asset_packs(ptr))
     }
 
@@ -200,7 +202,7 @@ impl AssetPackManager {
         };
         future
             .await
-            .map_err(BackgroundAssetsError::message)
+            .map_err(BackgroundAssetsError::from_json_str)
             .and_then(|OpaquePtr(ptr)| {
                 AssetPack::from_raw(ptr).ok_or_else(|| {
                     BackgroundAssetsError::message("asset-pack pointer must not be null")
@@ -222,7 +224,7 @@ impl AssetPackManager {
                 string_async_cb,
             );
         };
-        let value = future.await.map_err(BackgroundAssetsError::message)?;
+        let value = future.await.map_err(BackgroundAssetsError::from_json_str)?;
         let bits = value.parse::<u64>().map_err(|error| {
             BackgroundAssetsError::message(format!("invalid asset-pack status payload: {error}"))
         })?;
@@ -244,7 +246,7 @@ impl AssetPackManager {
                 string_async_cb,
             );
         };
-        let value = future.await.map_err(BackgroundAssetsError::message)?;
+        let value = future.await.map_err(BackgroundAssetsError::from_json_str)?;
         let bits = value.parse::<u64>().map_err(|error| {
             BackgroundAssetsError::message(format!("invalid local-status payload: {error}"))
         })?;
@@ -267,7 +269,7 @@ impl AssetPackManager {
                 string_async_cb,
             );
         };
-        future.await.map_err(BackgroundAssetsError::message)?;
+        future.await.map_err(BackgroundAssetsError::from_json_str)?;
         Ok(())
     }
 
@@ -277,7 +279,7 @@ impl AssetPackManager {
         unsafe {
             ffi::ba_asset_pack_manager_check_for_updates_async(self.ptr, ctx, string_async_cb);
         };
-        let payload = future.await.map_err(BackgroundAssetsError::message)?;
+        let payload = future.await.map_err(BackgroundAssetsError::from_json_str)?;
         let bridge: UpdateCheckPayload = serde_json::from_str(&payload).map_err(|error| {
             BackgroundAssetsError::message(format!("invalid update-check payload: {error}"))
         })?;
@@ -299,7 +301,7 @@ impl AssetPackManager {
                 string_async_cb,
             );
         };
-        future.await.map_err(BackgroundAssetsError::message)?;
+        future.await.map_err(BackgroundAssetsError::from_json_str)?;
         Ok(())
     }
 
@@ -326,34 +328,37 @@ impl AssetPackManager {
         asset_pack_id: Option<&str>,
         capacity: usize,
     ) -> Result<DownloadStatusStream, BackgroundAssetsError> {
-        let (stream, sender) = BoundedAsyncStream::new(capacity.max(1));
-        let ctx = Box::into_raw(Box::new(StreamContext {
-            sender,
-            consumed: AtomicBool::new(false),
-        }))
-        .cast::<c_void>();
         let asset_pack_id_cstr = asset_pack_id
             .map(|value| ffi::required_cstring(value, "asset_pack_id"))
             .transpose()?;
+        let (stream, sender) = BoundedAsyncStream::new(capacity.max(1));
+        let context = StatusStreamContext::new(StatusStreamState {
+            sender: Mutex::new(Some(sender)),
+        });
         let bridge_ptr = unsafe {
             ffi::ba_asset_pack_manager_status_updates_stream_create(
                 self.ptr,
                 asset_pack_id_cstr
                     .as_ref()
                     .map_or(ptr::null(), |value| value.as_ptr()),
-                ctx,
-                stream_callback,
+                context.as_ptr(),
+                StatusStreamContext::RETAIN,
+                StatusStreamContext::RELEASE,
+                status_stream_callback,
             )
         };
 
         if bridge_ptr.is_null() {
-            unsafe { drop(Box::from_raw(ctx.cast::<StreamContext>())) };
             return Err(BackgroundAssetsError::message(
                 "failed to create asset-pack status stream",
             ));
         }
 
-        Ok(DownloadStatusStream { stream, bridge_ptr })
+        Ok(DownloadStatusStream {
+            stream,
+            context,
+            bridge_ptr,
+        })
     }
 }
 
@@ -386,8 +391,16 @@ unsafe impl Send for AssetPackManager {}
 unsafe impl Sync for AssetPackManager {}
 
 #[cfg(feature = "async")]
+type ManagedAssetPackDelegateState =
+    HandlerState<dyn ManagedAssetPackDownloadDelegate, ManagedAssetPackDownloadEvent>;
+
+#[cfg(feature = "async")]
+type ManagedAssetPackDelegateContext = CallbackContext<ManagedAssetPackDelegateState>;
+
+#[cfg(feature = "async")]
 pub struct ManagedAssetPackDownloadEventStream {
     inner: BoundedAsyncStream<ManagedAssetPackDownloadEvent>,
+    context: ManagedAssetPackDelegateContext,
     bridge_ptr: *mut c_void,
 }
 
@@ -425,26 +438,12 @@ impl fmt::Debug for ManagedAssetPackDownloadEventStream {
 #[cfg(feature = "async")]
 impl Drop for ManagedAssetPackDownloadEventStream {
     fn drop(&mut self) {
-        if !self.bridge_ptr.is_null() {
-            unsafe {
-                ffi::ba_asset_pack_manager_delegate_clear_if_matches(self.bridge_ptr);
-                ffi::ba_object_release(self.bridge_ptr);
-            }
+        self.context.deactivate();
+        unsafe {
+            ffi::ba_asset_pack_manager_delegate_clear_if_matches(self.bridge_ptr);
+            ffi::ba_object_release(self.bridge_ptr);
         }
     }
-}
-
-#[cfg(feature = "async")]
-struct ManagedAssetPackDownloadDelegateState {
-    handler: Box<dyn ManagedAssetPackDownloadDelegate>,
-    sender: AsyncStreamSender<ManagedAssetPackDownloadEvent>,
-}
-
-#[cfg(feature = "async")]
-fn managed_asset_pack_delegate_state(
-) -> &'static Mutex<Option<ManagedAssetPackDownloadDelegateState>> {
-    static STATE: OnceLock<Mutex<Option<ManagedAssetPackDownloadDelegateState>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(None))
 }
 
 #[cfg(feature = "async")]
@@ -456,22 +455,24 @@ where
     H: ManagedAssetPackDownloadDelegate,
 {
     let (stream, sender) = BoundedAsyncStream::new(capacity.max(1));
-    if let Ok(mut state) = managed_asset_pack_delegate_state().lock() {
-        *state = Some(ManagedAssetPackDownloadDelegateState {
-            handler: Box::new(handler),
-            sender,
-        });
-    }
-
-    let bridge_ptr = unsafe { ffi::ba_asset_pack_manager_delegate_install() };
+    let handler: Box<dyn ManagedAssetPackDownloadDelegate> = Box::new(handler);
+    let context = ManagedAssetPackDelegateContext::new(HandlerState::new(handler, sender));
+    let mut error: *mut c_char = ptr::null_mut();
+    let bridge_ptr = unsafe {
+        ffi::ba_asset_pack_manager_delegate_install(
+            context.as_ptr(),
+            ManagedAssetPackDelegateContext::RETAIN,
+            ManagedAssetPackDelegateContext::RELEASE,
+            &raw mut error,
+        )
+    };
     if bridge_ptr.is_null() {
-        return Err(BackgroundAssetsError::message(
-            "failed to install managed asset-pack delegate",
-        ));
+        return Err(BackgroundAssetsError::from_owned_json_ptr(error));
     }
 
     Ok(ManagedAssetPackDownloadEventStream {
         inner: stream,
+        context,
         bridge_ptr,
     })
 }
@@ -488,8 +489,17 @@ fn string_from_ptr(ptr: *const c_char) -> String {
 }
 
 #[cfg(feature = "async")]
+struct StatusStreamState {
+    sender: Mutex<Option<AsyncStreamSender<DownloadStatusUpdate>>>,
+}
+
+#[cfg(feature = "async")]
+type StatusStreamContext = CallbackContext<StatusStreamState>;
+
+#[cfg(feature = "async")]
 pub struct DownloadStatusStream {
     stream: BoundedAsyncStream<DownloadStatusUpdate>,
+    context: StatusStreamContext,
     bridge_ptr: *mut c_void,
 }
 
@@ -525,9 +535,8 @@ impl fmt::Debug for DownloadStatusStream {
 #[cfg(feature = "async")]
 impl Drop for DownloadStatusStream {
     fn drop(&mut self) {
-        if !self.bridge_ptr.is_null() {
-            unsafe { ffi::ba_object_release(self.bridge_ptr) };
-        }
+        self.context.deactivate();
+        unsafe { ffi::ba_object_release(self.bridge_ptr) };
     }
 }
 
@@ -592,12 +601,14 @@ impl From<ProgressPayload> for DownloadProgress {
     }
 }
 
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 fn asset_pack_snapshot_from_json(json: &str) -> Option<AssetPackSnapshot> {
     serde_json::from_str::<AssetPackSnapshotPayload>(json)
         .ok()
         .map(Into::into)
 }
 
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 fn progress_from_json(json: &str) -> Option<DownloadProgress> {
     serde_json::from_str::<ProgressPayload>(json)
         .ok()
@@ -606,11 +617,12 @@ fn progress_from_json(json: &str) -> Option<DownloadProgress> {
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_began(
+    ctx: *mut c_void,
     asset_pack_json: *const c_char,
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = asset_pack_json;
+        let _ = (ctx, asset_pack_json);
     }
 
     #[cfg(feature = "async")]
@@ -619,26 +631,28 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_began(
         else {
             return;
         };
-        if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic("ba_rust_managed_asset_pack_download_delegate_began", || {
-                    state.handler.download_of_asset_pack_began(&asset_pack);
+        let site = "ManagedAssetPackDownloadDelegate::download_of_asset_pack_began";
+        unsafe {
+            ManagedAssetPackDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| {
+                    handler.download_of_asset_pack_began(&asset_pack);
                 });
                 state
                     .sender
                     .push(ManagedAssetPackDownloadEvent::Began { asset_pack });
-            }
-        }
+            })
+        };
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_paused(
+    ctx: *mut c_void,
     asset_pack_json: *const c_char,
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = asset_pack_json;
+        let _ = (ctx, asset_pack_json);
     }
 
     #[cfg(feature = "async")]
@@ -647,31 +661,29 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_paused(
         else {
             return;
         };
-        if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic(
-                    "ba_rust_managed_asset_pack_download_delegate_paused",
-                    || {
-                        state.handler.download_of_asset_pack_paused(&asset_pack);
-                    },
-                );
+        let site = "ManagedAssetPackDownloadDelegate::download_of_asset_pack_paused";
+        unsafe {
+            ManagedAssetPackDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| {
+                    handler.download_of_asset_pack_paused(&asset_pack);
+                });
                 state
                     .sender
                     .push(ManagedAssetPackDownloadEvent::Paused { asset_pack });
-            }
-        }
+            })
+        };
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_progress(
+    ctx: *mut c_void,
     asset_pack_json: *const c_char,
     progress_json: *const c_char,
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = asset_pack_json;
-        let _ = progress_json;
+        let _ = (ctx, asset_pack_json, progress_json);
     }
 
     #[cfg(feature = "async")]
@@ -683,34 +695,31 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_progress(
         let Some(progress) = progress_from_json(&string_from_ptr(progress_json)) else {
             return;
         };
-        if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic(
-                    "ba_rust_managed_asset_pack_download_delegate_progress",
-                    || {
-                        state
-                            .handler
-                            .download_of_asset_pack_has_progress(&asset_pack, &progress);
-                    },
-                );
+        let site = "ManagedAssetPackDownloadDelegate::download_of_asset_pack_has_progress";
+        unsafe {
+            ManagedAssetPackDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| {
+                    handler.download_of_asset_pack_has_progress(&asset_pack, &progress);
+                });
                 state
                     .sender
                     .push(ManagedAssetPackDownloadEvent::Downloading {
                         asset_pack,
                         progress,
                     });
-            }
-        }
+            })
+        };
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_finished(
+    ctx: *mut c_void,
     asset_pack_json: *const c_char,
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = asset_pack_json;
+        let _ = (ctx, asset_pack_json);
     }
 
     #[cfg(feature = "async")]
@@ -719,31 +728,29 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_finished(
         else {
             return;
         };
-        if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic(
-                    "ba_rust_managed_asset_pack_download_delegate_finished",
-                    || {
-                        state.handler.download_of_asset_pack_finished(&asset_pack);
-                    },
-                );
+        let site = "ManagedAssetPackDownloadDelegate::download_of_asset_pack_finished";
+        unsafe {
+            ManagedAssetPackDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| {
+                    handler.download_of_asset_pack_finished(&asset_pack);
+                });
                 state
                     .sender
                     .push(ManagedAssetPackDownloadEvent::Finished { asset_pack });
-            }
-        }
+            })
+        };
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_failed(
+    ctx: *mut c_void,
     asset_pack_json: *const c_char,
     error_json: *const c_char,
 ) {
     #[cfg(not(feature = "async"))]
     {
-        let _ = asset_pack_json;
-        let _ = error_json;
+        let _ = (ctx, asset_pack_json, error_json);
     }
 
     #[cfg(feature = "async")]
@@ -752,22 +759,18 @@ pub unsafe extern "C" fn ba_rust_managed_asset_pack_download_delegate_failed(
         else {
             return;
         };
-        let error = BackgroundAssetsError::from_json_str(&string_from_ptr(error_json));
-        if let Ok(mut state_guard) = managed_asset_pack_delegate_state().lock() {
-            if let Some(state) = state_guard.as_mut() {
-                catch_user_panic(
-                    "ba_rust_managed_asset_pack_download_delegate_failed",
-                    || {
-                        state
-                            .handler
-                            .download_of_asset_pack_failed(&asset_pack, &error);
-                    },
-                );
+        let error = BackgroundAssetsError::from_json_str(string_from_ptr(error_json));
+        let site = "ManagedAssetPackDownloadDelegate::download_of_asset_pack_failed";
+        unsafe {
+            ManagedAssetPackDelegateContext::with(ctx, site, |state| {
+                state.call(site, |handler| {
+                    handler.download_of_asset_pack_failed(&asset_pack, &error);
+                });
                 state
                     .sender
                     .push(ManagedAssetPackDownloadEvent::Failed { asset_pack, error });
-            }
-        }
+            })
+        };
     }
 }
 
@@ -834,38 +837,45 @@ unsafe extern "C" fn string_async_cb(result: *mut c_void, error: *const c_char, 
 }
 
 #[cfg(feature = "async")]
-struct StreamContext {
-    sender: AsyncStreamSender<DownloadStatusUpdate>,
-    consumed: AtomicBool,
+fn status_update_from_json(json: &str) -> Option<DownloadStatusUpdate> {
+    let payload = serde_json::from_str::<DownloadStatusUpdatePayload>(json).ok()?;
+    DownloadStatusUpdate::try_from(payload).ok()
 }
 
 #[cfg(feature = "async")]
-unsafe extern "C" fn stream_callback(ctx: *mut c_void, event_json: *mut c_char, done: bool) {
+unsafe extern "C" fn status_stream_callback(
+    ctx: *mut c_void,
+    event_json: *const c_char,
+    done: bool,
+) {
     if done {
-        if !ctx.is_null() {
-            // One-shot guard: only the caller that flips `consumed` from false
-            // to true reclaims the box, so a duplicate "done" cannot double-free.
-            let consumed = unsafe { &(*ctx.cast::<StreamContext>()).consumed };
-            if consumed.swap(true, Ordering::AcqRel) {
-                return;
+        unsafe {
+            StatusStreamContext::with(ctx, "asset-pack status stream finish", |state| {
+                let sender = state
+                    .sender
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                drop(sender);
+            })
+        };
+        return;
+    }
+    let Some(update) = status_update_from_json(&string_from_ptr(event_json)) else {
+        return;
+    };
+    unsafe {
+        StatusStreamContext::with(ctx, "asset-pack status stream", |state| {
+            if let Some(sender) = state
+                .sender
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                sender.push(update);
             }
-            unsafe { drop(Box::from_raw(ctx.cast::<StreamContext>())) };
-        }
-        return;
-    }
-    if ctx.is_null() || event_json.is_null() {
-        return;
-    }
-
-    let json = unsafe { ffi::owned_string(event_json) };
-    let Ok(payload) = serde_json::from_str::<DownloadStatusUpdatePayload>(&json) else {
-        return;
+        })
     };
-    let Ok(update) = DownloadStatusUpdate::try_from(payload) else {
-        return;
-    };
-    let context = unsafe { &mut *ctx.cast::<StreamContext>() };
-    context.sender.push(update);
 }
 
 #[cfg(test)]
@@ -896,5 +906,197 @@ mod tests {
         assert_eq!(progress.total_unit_count, 20);
         assert!((progress.fraction_completed - 0.5).abs() < f64::EPSILON);
         assert_eq!(progress.localized_description, "halfway");
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+mod async_tests {
+    use std::ffi::CString;
+    use std::ptr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use doom_fish_utils::stream::BoundedAsyncStream;
+
+    use super::{
+        ba_rust_managed_asset_pack_download_delegate_failed,
+        ba_rust_managed_asset_pack_download_delegate_progress, status_stream_callback,
+        DownloadProgress, DownloadStatusUpdate, ManagedAssetPackDelegateContext,
+        ManagedAssetPackDownloadDelegate, ManagedAssetPackDownloadEvent, StatusStreamContext,
+        StatusStreamState,
+    };
+    use crate::asset_pack::AssetPackSnapshot;
+    use crate::error::BackgroundAssetsError;
+    use crate::handler::HandlerState;
+
+    const BEGAN_JSON: &str = r#"{"assetPack":{"description":"Pack One","downloadSize":1024,"id":"pack.one","version":3},"kind":"began"}"#;
+    const ASSET_PACK_JSON: &str =
+        r#"{"description":"Pack One","downloadSize":1024,"id":"pack.one","version":3}"#;
+
+    fn status_context() -> (
+        BoundedAsyncStream<DownloadStatusUpdate>,
+        StatusStreamContext,
+    ) {
+        let (stream, sender) = BoundedAsyncStream::new(4);
+        let context = StatusStreamContext::new(StatusStreamState {
+            sender: Mutex::new(Some(sender)),
+        });
+        (stream, context)
+    }
+
+    #[test]
+    fn status_stream_closes_once_and_ignores_duplicate_done() {
+        let (stream, context) = status_context();
+        let foreign = context.as_ptr();
+        unsafe { (StatusStreamContext::RETAIN)(foreign) };
+        let began = CString::new(BEGAN_JSON).unwrap();
+
+        unsafe { status_stream_callback(foreign, began.as_ptr(), false) };
+        assert!(matches!(
+            stream.try_next(),
+            Some(DownloadStatusUpdate::Began { asset_pack }) if asset_pack.id == "pack.one"
+        ));
+
+        unsafe { status_stream_callback(foreign, ptr::null(), true) };
+        assert!(stream.is_closed());
+        unsafe { status_stream_callback(foreign, ptr::null(), true) };
+        unsafe { status_stream_callback(foreign, began.as_ptr(), false) };
+        assert!(stream.try_next().is_none());
+
+        drop(context);
+        unsafe { status_stream_callback(foreign, ptr::null(), true) };
+        unsafe { (StatusStreamContext::RELEASE)(foreign) };
+    }
+
+    #[test]
+    fn status_stream_ignores_updates_after_the_rust_side_is_dropped() {
+        let (stream, context) = status_context();
+        let foreign = context.retained_ptr();
+        let began = CString::new(BEGAN_JSON).unwrap();
+
+        drop(context);
+        unsafe { status_stream_callback(foreign, began.as_ptr(), false) };
+        assert!(stream.try_next().is_none());
+        assert!(!stream.is_closed());
+
+        unsafe { (StatusStreamContext::RELEASE)(foreign) };
+        assert!(stream.is_closed());
+    }
+
+    #[test]
+    fn status_stream_skips_malformed_and_null_payloads() {
+        let (stream, context) = status_context();
+        let unknown = CString::new(
+            r#"{"assetPack":{"description":"","downloadSize":0,"id":"x","version":0},"kind":"mystery"}"#,
+        )
+        .unwrap();
+        let garbage = CString::new("not json").unwrap();
+
+        unsafe { status_stream_callback(context.as_ptr(), unknown.as_ptr(), false) };
+        unsafe { status_stream_callback(context.as_ptr(), garbage.as_ptr(), false) };
+        unsafe { status_stream_callback(context.as_ptr(), ptr::null(), false) };
+        unsafe { status_stream_callback(ptr::null_mut(), garbage.as_ptr(), false) };
+
+        assert!(stream.try_next().is_none());
+        assert!(!stream.is_closed());
+    }
+
+    struct Recorder {
+        progress: Arc<Mutex<Vec<f64>>>,
+        failures: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl ManagedAssetPackDownloadDelegate for Recorder {
+        fn download_of_asset_pack_has_progress(
+            &mut self,
+            asset_pack: &AssetPackSnapshot,
+            progress: &DownloadProgress,
+        ) {
+            assert_eq!(asset_pack.id, "pack.one");
+            self.progress
+                .lock()
+                .unwrap()
+                .push(progress.fraction_completed);
+        }
+
+        fn download_of_asset_pack_failed(
+            &mut self,
+            _asset_pack: &AssetPackSnapshot,
+            error: &BackgroundAssetsError,
+        ) {
+            assert_eq!(error.asset_pack_id(), Some("pack.one"));
+            self.failures.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for Recorder {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn managed_delegate_callbacks_follow_the_context_lifetime() {
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let failures = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (stream, sender) = BoundedAsyncStream::new(8);
+        let handler: Box<dyn ManagedAssetPackDownloadDelegate> = Box::new(Recorder {
+            progress: Arc::clone(&progress),
+            failures: Arc::clone(&failures),
+            drops: Arc::clone(&drops),
+        });
+        let context = ManagedAssetPackDelegateContext::new(HandlerState::new(handler, sender));
+        let foreign = context.retained_ptr();
+        let asset_pack = CString::new(ASSET_PACK_JSON).unwrap();
+        let progress_json = CString::new(
+            r#"{"completedUnitCount":5,"fractionCompleted":0.5,"localizedDescription":"half","totalUnitCount":10}"#,
+        )
+        .unwrap();
+        let error_json = CString::new(
+            r#"{"assetPackID":"pack.one","code":0,"domain":"BAManagedErrorDomain","message":"missing"}"#,
+        )
+        .unwrap();
+
+        unsafe {
+            ba_rust_managed_asset_pack_download_delegate_progress(
+                foreign,
+                asset_pack.as_ptr(),
+                progress_json.as_ptr(),
+            );
+            ba_rust_managed_asset_pack_download_delegate_failed(
+                foreign,
+                asset_pack.as_ptr(),
+                error_json.as_ptr(),
+            );
+        }
+        assert_eq!(*progress.lock().unwrap(), vec![0.5]);
+        assert_eq!(failures.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            stream.try_next(),
+            Some(ManagedAssetPackDownloadEvent::Downloading { progress, .. })
+                if progress.completed_unit_count == 5
+        ));
+        assert!(matches!(
+            stream.try_next(),
+            Some(ManagedAssetPackDownloadEvent::Failed { error, .. })
+                if error.managed_error_code().is_some()
+        ));
+
+        drop(context);
+        unsafe {
+            ba_rust_managed_asset_pack_download_delegate_failed(
+                foreign,
+                asset_pack.as_ptr(),
+                error_json.as_ptr(),
+            );
+        }
+        assert_eq!(failures.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        unsafe { (ManagedAssetPackDelegateContext::RELEASE)(foreign) };
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(stream.is_closed());
     }
 }

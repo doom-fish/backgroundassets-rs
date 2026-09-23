@@ -1,27 +1,16 @@
 #![cfg(feature = "async")]
 
 use backgroundassets::{
-    install_global_managed_downloader_extension, AppExtensionInfo, AssetPackSnapshot,
-    AuthenticationChallenge, ChallengeDisposition, ContentRequest, Download,
-    DownloadManagerDelegate, DownloadManagerEvent, DownloadPriority, DownloadSnapshot,
-    DownloadStatus, DownloadWriteProgress, DownloaderExtensionHandler, ExtensionEvent,
-    ManagedDownloaderExtensionConfiguration,
+    install_global_managed_downloader_extension, AssetPackSnapshot, AuthenticationChallenge,
+    ChallengeDisposition, Download, DownloadManagerEvent, DownloadPriority, DownloadSnapshot,
+    DownloadStatus, DownloadWriteProgress, ExtensionEvent, ManagedDownloaderExtensionHandler,
 };
 
 struct ExampleExtension;
 
-impl DownloaderExtensionHandler for ExampleExtension {
+impl ManagedDownloaderExtensionHandler for ExampleExtension {
     fn should_download_asset_pack(&mut self, _asset_pack: &AssetPackSnapshot) -> bool {
         true
-    }
-
-    fn downloads(
-        &mut self,
-        _request: ContentRequest,
-        _manifest_url: &str,
-        _extension_info: &AppExtensionInfo,
-    ) -> Result<Vec<Download>, backgroundassets::BackgroundAssetsError> {
-        Ok(Vec::new())
     }
 
     fn did_receive_challenge(
@@ -33,23 +22,13 @@ impl DownloaderExtensionHandler for ExampleExtension {
     }
 }
 
-struct ExampleDownloadManagerDelegate;
-
-impl DownloadManagerDelegate for ExampleDownloadManagerDelegate {}
-
 #[test]
-fn managed_extension_registration_exposes_streams() {
-    let registration = install_global_managed_downloader_extension(
-        ExampleExtension,
-        ManagedDownloaderExtensionConfiguration::new(ExampleDownloadManagerDelegate)
-            .extension_event_capacity(0)
-            .download_manager_event_capacity(0),
-    );
+fn managed_extension_registration_exposes_an_open_stream() {
+    let events = install_global_managed_downloader_extension(ExampleExtension, 0);
 
-    assert_eq!(registration.extension_events().buffered_count(), 0);
-    assert_eq!(registration.download_manager_events().buffered_count(), 0);
-    assert!(!registration.extension_events().is_closed());
-    assert!(!registration.download_manager_events().is_closed());
+    assert_eq!(events.buffered_count(), 0);
+    assert!(!events.is_closed());
+    assert!(events.try_next().is_none());
 }
 
 #[test]

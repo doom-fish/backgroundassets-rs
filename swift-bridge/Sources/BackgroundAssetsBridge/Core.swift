@@ -1,9 +1,139 @@
 import BackgroundAssets
 import ExtensionFoundation
 import Foundation
+import Security
 import System
 
-let unavailableMessage = "BackgroundAssets requires macOS 26.0 or newer"
+let unavailableMessage = "The managed asset-pack API requires macOS 26.0 or newer"
+
+private func infoNumberIsNonNegative(_ value: Any?) -> Bool {
+    guard let number = value as? NSNumber else { return false }
+    return number.int64Value >= 0
+}
+
+let downloadManagerUnavailableReason: String? = {
+    guard let bundleIdentifier = Bundle.main.bundleIdentifier, !bundleIdentifier.isEmpty else {
+        return "BADownloadManager requires the process to have a bundle identifier"
+    }
+    guard Bundle.main.bundleURL.pathExtension != "appex" else { return nil }
+    guard let info = Bundle.main.infoDictionary else {
+        return "BADownloadManager requires the app to have an Info.plist"
+    }
+    guard let restrictions = info["BAInitialDownloadRestrictions"] as? [String: Any] else {
+        return "the app's Info.plist must contain a BAInitialDownloadRestrictions dictionary"
+    }
+    guard let domains = restrictions["BADownloadDomainAllowList"] as? [Any],
+          !domains.isEmpty,
+          domains.allSatisfy({ ($0 as? String)?.isEmpty == false })
+    else {
+        return "BAInitialDownloadRestrictions must contain a BADownloadDomainAllowList array of at least one domain"
+    }
+    guard infoNumberIsNonNegative(restrictions["BADownloadAllowance"]) else {
+        return "BAInitialDownloadRestrictions must contain a BADownloadAllowance number that is 0 or greater"
+    }
+    if #available(macOS 13.3, *), !infoNumberIsNonNegative(restrictions["BAEssentialDownloadAllowance"]) {
+        return "BAInitialDownloadRestrictions must contain a BAEssentialDownloadAllowance number that is 0 or greater"
+    }
+    guard let manifestURL = info["BAManifestURL"] as? String,
+          URL(string: manifestURL)?.scheme?.lowercased() == "https"
+    else {
+        return "the app's Info.plist must contain a BAManifestURL string with an https URL"
+    }
+    return nil
+}()
+
+private func processTeamIdentifier() -> String? {
+    var code: SecCode?
+    guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return nil }
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else { return nil }
+    var information: CFDictionary?
+    guard SecCodeCopySigningInformation(
+        staticCode,
+        SecCSFlags(rawValue: kSecCSSigningInformation),
+        &information
+    ) == errSecSuccess,
+        let information = information as? [String: Any]
+    else {
+        return nil
+    }
+    return information[kSecCodeInfoTeamIdentifier as String] as? String
+}
+
+let assetPackManagerUnavailableReason: String? = {
+    guard #available(macOS 26.0, *) else { return unavailableMessage }
+    guard let bundleIdentifier = Bundle.main.bundleIdentifier, !bundleIdentifier.isEmpty else {
+        return "AssetPackManager requires the main bundle to have a bundle identifier"
+    }
+    guard processTeamIdentifier() != nil else {
+        return "AssetPackManager requires the process to be signed with a team identifier"
+    }
+    guard let appGroupID = Bundle.main.object(forInfoDictionaryKey: "BAAppGroupID") as? String,
+          !appGroupID.isEmpty
+    else {
+        return "AssetPackManager requires a BAAppGroupID string in the main bundle's Info.plist"
+    }
+    guard UserDefaults(suiteName: appGroupID) != nil else {
+        return "AssetPackManager requires the user defaults of the app group \(appGroupID)"
+    }
+    return nil
+}()
+
+final class DownloadsRequestScope: @unchecked Sendable {
+    static let shared = DownloadsRequestScope()
+
+    private let lock = NSLock()
+    private var depth = 0
+
+    func enter() {
+        lock.lock()
+        depth += 1
+        lock.unlock()
+    }
+
+    func leave() {
+        lock.lock()
+        depth -= 1
+        lock.unlock()
+    }
+
+    var isActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return depth > 0
+    }
+}
+
+func downloadSchedulingRejection(_ download: BADownload, operation: String) -> String? {
+    if DownloadsRequestScope.shared.isActive {
+        return "\(operation) can't be called while the downloader extension is answering downloads(for:); return the downloads instead"
+    }
+    if #available(macOS 13.3, *), download.isEssential {
+        return "\(operation) doesn't accept essential downloads; call removing_essential() first"
+    }
+    return nil
+}
+
+public typealias ContextReferenceCallback = @convention(c) (UnsafeMutableRawPointer?) -> Void
+
+final class RustContext: @unchecked Sendable {
+    let pointer: UnsafeMutableRawPointer
+    private let release: ContextReferenceCallback
+
+    init(
+        _ pointer: UnsafeMutableRawPointer,
+        retain: ContextReferenceCallback,
+        release: @escaping ContextReferenceCallback
+    ) {
+        retain(pointer)
+        self.pointer = pointer
+        self.release = release
+    }
+
+    deinit {
+        release(pointer)
+    }
+}
 
 struct BridgeErrorPayload: Encodable {
     let domain: String
@@ -61,6 +191,7 @@ struct DownloadStatusUpdatePayload: Encodable {
     let error: BridgeErrorPayload?
 }
 
+@available(macOS 26.0, *)
 final class AssetPackBox {
     let value: AssetPack
 
@@ -69,6 +200,7 @@ final class AssetPackBox {
     }
 }
 
+@available(macOS 26.0, *)
 final class ManifestBox {
     let value: AssetPackManifest
 
@@ -77,6 +209,7 @@ final class ManifestBox {
     }
 }
 
+@available(macOS 26.0, *)
 final class ManagerBox {
     let value: AssetPackManager
 
@@ -85,6 +218,7 @@ final class ManagerBox {
     }
 }
 
+@available(macOS 26.0, *)
 final class AssetPackArrayBox {
     let value: [AssetPack]
 
@@ -138,7 +272,7 @@ final class AsyncCallbackBox: @unchecked Sendable {
     }
 
     func fail(message: String) {
-        message.withCString { callback(nil, $0, context) }
+        messageErrorString(message).withCString { callback(nil, $0, context) }
     }
 
     func fail(error: any Error) {
@@ -147,25 +281,57 @@ final class AsyncCallbackBox: @unchecked Sendable {
 }
 
 final class StreamCallbackBox: @unchecked Sendable {
-    private let callback: @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<CChar>?, Bool) -> Void
-    private let context: UnsafeMutableRawPointer?
+    private let callback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Bool) -> Void
+    private let context: RustContext
 
     init(
-        callback: @escaping @convention(c) (UnsafeMutableRawPointer?, UnsafeMutablePointer<CChar>?, Bool) -> Void,
-        context: UnsafeMutableRawPointer?
+        callback: @escaping @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, Bool) -> Void,
+        context: RustContext
     ) {
         self.callback = callback
         self.context = context
     }
 
     func push(json: String) {
-        if let string = ffiString(json) {
-            callback(context, string, false)
-        }
+        json.withCString { callback(context.pointer, $0, false) }
     }
 
     func finish() {
-        callback(context, nil, true)
+        callback(context.pointer, nil, true)
+    }
+}
+
+final class ExclusiveControlJob: @unchecked Sendable {
+    private let callback: @convention(c) (UnsafeMutableRawPointer?, Bool, UnsafePointer<CChar>?) -> Void
+    private let lock = NSLock()
+    private var job: UnsafeMutableRawPointer?
+
+    init(
+        callback: @escaping @convention(c) (UnsafeMutableRawPointer?, Bool, UnsafePointer<CChar>?) -> Void,
+        job: UnsafeMutableRawPointer
+    ) {
+        self.callback = callback
+        self.job = job
+    }
+
+    deinit {
+        if let job {
+            messageErrorString("the exclusive-control handler was released without being called")
+                .withCString { callback(job, false, $0) }
+        }
+    }
+
+    func run(acquiredLock: Bool, error: (any Error)?) {
+        lock.lock()
+        let job = self.job
+        self.job = nil
+        lock.unlock()
+        guard let job else { return }
+        if let error {
+            errorString(error).withCString { callback(job, acquiredLock, $0) }
+        } else {
+            callback(job, acquiredLock, nil)
+        }
     }
 }
 
@@ -185,16 +351,19 @@ func borrowed<T: AnyObject>(_ ptr: UnsafeMutableRawPointer, as type: T.Type = T.
 }
 
 @inline(__always)
+@available(macOS 26.0, *)
 func assetPack(from ptr: UnsafeMutableRawPointer) -> AssetPack {
     borrowed(ptr, as: AssetPackBox.self).value
 }
 
 @inline(__always)
+@available(macOS 26.0, *)
 func manifest(from ptr: UnsafeMutableRawPointer) -> AssetPackManifest {
     borrowed(ptr, as: ManifestBox.self).value
 }
 
 @inline(__always)
+@available(macOS 26.0, *)
 func manager(from ptr: UnsafeMutableRawPointer) -> AssetPackManager {
     borrowed(ptr, as: ManagerBox.self).value
 }
@@ -216,9 +385,7 @@ func extensionInfo(from ptr: UnsafeMutableRawPointer) -> BAAppExtensionInfo {
 
 func bridgeJSON<T: Encodable>(_ value: T) throws -> String {
     let encoder = JSONEncoder()
-    if #available(macOS 10.13, *) {
-        encoder.outputFormatting = [.sortedKeys]
-    }
+    encoder.outputFormatting = [.sortedKeys]
     let data = try encoder.encode(value)
     guard let string = String(data: data, encoding: .utf8) else {
         throw NSError(
@@ -312,10 +479,11 @@ func copyDataToHeap(
     return pointer
 }
 
-func urlFromRawPath(_ rawPath: String) -> URL {
-    rawPath.hasPrefix("file:") ? URL(string: rawPath)! : URL(fileURLWithPath: rawPath)
+func urlFromRawPath(_ rawPath: String) -> URL? {
+    rawPath.hasPrefix("file:") ? URL(string: rawPath) : URL(fileURLWithPath: rawPath)
 }
 
+@available(macOS 26.0, *)
 func assetPackSnapshot(_ assetPack: AssetPack) -> AssetPackSnapshot {
     AssetPackSnapshot(
         id: assetPack.id,
@@ -326,29 +494,42 @@ func assetPackSnapshot(_ assetPack: AssetPack) -> AssetPackSnapshot {
 }
 
 func downloadSnapshot(_ download: BADownload) -> DownloadSnapshot {
-    DownloadSnapshot(
+    let isEssential: Bool
+    if #available(macOS 13.3, *) {
+        isEssential = download.isEssential
+    } else {
+        isEssential = false
+    }
+    return DownloadSnapshot(
         identifier: download.identifier,
         uniqueIdentifier: download.uniqueIdentifier,
         status: download.state.rawValue,
         priority: download.priority.rawValue,
-        isEssential: download.isEssential,
+        isEssential: isEssential,
         isURLDownload: download is BAURLDownload
     )
 }
 
 func progressSnapshot(_ progress: Progress) -> ProgressSnapshot {
-    ProgressSnapshot(
+    let fractionCompleted = progress.fractionCompleted
+    return ProgressSnapshot(
         completedUnitCount: progress.completedUnitCount,
         totalUnitCount: progress.totalUnitCount,
-        fractionCompleted: progress.fractionCompleted,
+        fractionCompleted: fractionCompleted.isFinite ? fractionCompleted : 0,
         localizedDescription: progress.localizedDescription
     )
 }
 
 func extensionInfoSnapshot(_ info: BAAppExtensionInfo) -> ExtensionInfoSnapshot {
-    ExtensionInfoSnapshot(
+    let restrictedEssentialDownloadSizeRemaining: Int?
+    if #available(macOS 13.3, *) {
+        restrictedEssentialDownloadSizeRemaining = info.restrictedEssentialDownloadSizeRemaining
+    } else {
+        restrictedEssentialDownloadSizeRemaining = nil
+    }
+    return ExtensionInfoSnapshot(
         restrictedDownloadSizeRemaining: info.restrictedDownloadSizeRemaining,
-        restrictedEssentialDownloadSizeRemaining: info.restrictedEssentialDownloadSizeRemaining
+        restrictedEssentialDownloadSizeRemaining: restrictedEssentialDownloadSizeRemaining
     )
 }
 
@@ -362,7 +543,8 @@ func challengeSnapshot(_ challenge: URLAuthenticationChallenge) -> Authenticatio
     )
 }
 
-func statusUpdatePayload(_ update: AssetPackManager.DownloadStatusUpdate) -> DownloadStatusUpdatePayload {
+@available(macOS 26.0, *)
+func statusUpdatePayload(_ update: AssetPackManager.DownloadStatusUpdate) -> DownloadStatusUpdatePayload? {
     switch update {
     case let .began(assetPack):
         return DownloadStatusUpdatePayload(
@@ -400,15 +582,11 @@ func statusUpdatePayload(_ update: AssetPackManager.DownloadStatusUpdate) -> Dow
             error: errorPayload(error)
         )
     @unknown default:
-        return DownloadStatusUpdatePayload(
-            kind: "unknown",
-            assetPack: AssetPackSnapshot(id: "", downloadSize: 0, version: 0, description: ""),
-            progress: nil,
-            error: nil
-        )
+        return nil
     }
 }
 
+@available(macOS 26.0, *)
 func sortedAssetPacks(_ assetPacks: some Sequence<AssetPack>) -> [AssetPack] {
     assetPacks.sorted { lhs, rhs in
         if lhs.id == rhs.id {

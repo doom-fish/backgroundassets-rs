@@ -22,6 +22,8 @@ pub mod download;
 pub mod error;
 pub mod extension;
 mod ffi;
+#[cfg(feature = "async")]
+mod handler;
 pub mod manager;
 pub mod manifest;
 
@@ -35,16 +37,17 @@ pub use error::{
     BackgroundAssetsError, ManagedBackgroundAssetsError, ManagedBackgroundAssetsErrorCode,
 };
 #[cfg(feature = "async")]
-pub use download::{install_global_download_manager_delegate, DownloadManagerEventStream};
+pub use download::{
+    install_global_download_manager_delegate, DownloadManagerEventStream, ExclusiveControlFuture,
+};
 #[cfg(feature = "async")]
 pub use extension::{
     install_global_downloader_extension, install_global_managed_downloader_extension,
-    ExtensionEventStream, ManagedDownloaderExtensionConfiguration,
-    ManagedDownloaderExtensionRegistration,
+    ExtensionEventStream,
 };
 pub use extension::{
     AppExtensionInfo, AppExtensionInfoSnapshot, AuthenticationChallenge, ChallengeDisposition,
-    DownloaderExtensionHandler, ExtensionEvent,
+    DownloaderExtensionHandler, ExtensionEvent, ManagedDownloaderExtensionHandler,
 };
 pub use manager::{
     AssetPackManager, ManagedAssetPackDownloadDelegate, ManagedAssetPackDownloadEvent,
