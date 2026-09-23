@@ -9,7 +9,7 @@ description = "Safe Rust bindings for Apple's BackgroundAssets framework — on-
 authors = ["Per Johansson <per@doom.fish>"]
 keywords = ["backgroundassets", "assetpack", "apple", "macos"]
 categories = ["api-bindings", "os::macos-apis"]
-rust-version = "1.76"
+rust-version = "1.82"
 readme = "README.md"
 build = "build.rs"
 include = [
@@ -43,7 +43,7 @@ default = []
 async = ["dep:doom-fish-utils"]
 
 [dependencies]
-doom-fish-utils = { path = "../doom-fish-utils", version = ">=0.3, <0.4", optional = true }
+doom-fish-utils = { path = "../doom-fish-utils", version = ">=0.4.1, <0.5", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
