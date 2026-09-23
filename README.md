@@ -2,12 +2,12 @@
 
 Safe Rust bindings for Apple's `BackgroundAssets` framework — on-demand asset packs, manifest parsing, managed asset-pack availability, downloader-extension bridging, and URL download descriptors on macOS.
 
-> **Status:** v0.3.0 adds direct `BADownloadManagerDelegate` and `BAManagedAssetPackDownloadDelegate` wrappers, the self-hosted managed-extension principal class, and typed `ManagedBackgroundAssetsError` support alongside the executor-agnostic `async_api` module.
+> **Status:** v0.4.0 is a soundness release. Delegate, stream and extension callbacks keep their Rust state alive for as long as the framework can call them, `with_exclusive_control` runs your closure while the lock is held, the managed principal class uses the system's own configuration, and calls the framework would answer by terminating the process now return errors. See the [CHANGELOG](CHANGELOG.md) for the breaking changes.
 
 ## Quick start
 
 ```toml
-backgroundassets = { version = "0.3", features = ["async"] }
+backgroundassets = { version = "0.4", features = ["async"] }
 ```
 
 ```rust,no_run
