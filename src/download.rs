@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "async")]
 use doom_fish_utils::callback_context::CallbackContext;
 #[cfg(feature = "async")]
-use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion, AsyncCompletionFuture};
+use doom_fish_utils::completion::{AsyncCompletion, AsyncCompletionFuture};
 #[cfg(feature = "async")]
 use doom_fish_utils::panic_safe::{catch_user_panic, catch_user_panic_result};
 #[cfg(feature = "async")]
@@ -469,16 +469,16 @@ impl DownloadManager {
 
     #[cfg(feature = "async")]
     pub async fn current_downloads(&self) -> Result<Vec<Download>, BackgroundAssetsError> {
-        let (future, ctx) = AsyncCompletion::<OpaquePtr>::create();
+        let (future, ctx) = AsyncCompletion::<ffi::RetainedObject>::create();
         unsafe {
             ffi::ba_download_manager_fetch_current_downloads_async(
                 self.ptr,
                 ctx,
-                downloads_async_cb,
+                ffi::retained_object_async_cb,
             );
         }
-        let OpaquePtr(ptr) = future.await.map_err(BackgroundAssetsError::from_json_str)?;
-        Ok(collect_downloads(ptr))
+        let downloads = future.await.map_err(BackgroundAssetsError::from_json_str)?;
+        Ok(collect_downloads(downloads.into_raw()))
     }
 
     #[cfg(feature = "async")]
@@ -931,32 +931,6 @@ pub unsafe extern "C" fn ba_rust_download_manager_delegate_finished(
                     .sender
                     .push(DownloadManagerEvent::Finished { download, file_url });
             })
-        };
-    }
-}
-
-#[cfg(feature = "async")]
-struct OpaquePtr(*mut c_void);
-#[cfg(feature = "async")]
-unsafe impl Send for OpaquePtr {}
-
-#[cfg(feature = "async")]
-unsafe extern "C" fn downloads_async_cb(
-    result: *mut c_void,
-    error: *const c_char,
-    ctx: *mut c_void,
-) {
-    if !error.is_null() {
-        let message = unsafe { error_from_cstr(error) };
-        unsafe { AsyncCompletion::<OpaquePtr>::complete_err(ctx, message) };
-    } else if !result.is_null() {
-        unsafe { AsyncCompletion::complete_ok(ctx, OpaquePtr(result)) };
-    } else {
-        unsafe {
-            AsyncCompletion::<OpaquePtr>::complete_err(
-                ctx,
-                "download-array pointer must not be null".into(),
-            );
         };
     }
 }

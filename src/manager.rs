@@ -179,10 +179,16 @@ impl AssetPackManager {
 
     #[cfg(feature = "async")]
     pub async fn all_asset_packs(&self) -> Result<Vec<AssetPack>, BackgroundAssetsError> {
-        let (future, ctx) = AsyncCompletion::<OpaquePtr>::create();
-        unsafe { ffi::ba_asset_pack_manager_all_asset_packs_async(self.ptr, ctx, object_async_cb) };
-        let OpaquePtr(ptr) = future.await.map_err(BackgroundAssetsError::from_json_str)?;
-        Ok(collect_asset_packs(ptr))
+        let (future, ctx) = AsyncCompletion::<ffi::RetainedObject>::create();
+        unsafe {
+            ffi::ba_asset_pack_manager_all_asset_packs_async(
+                self.ptr,
+                ctx,
+                ffi::retained_object_async_cb,
+            );
+        };
+        let asset_packs = future.await.map_err(BackgroundAssetsError::from_json_str)?;
+        Ok(collect_asset_packs(asset_packs.into_raw()))
     }
 
     #[cfg(feature = "async")]
@@ -191,20 +197,20 @@ impl AssetPackManager {
         asset_pack_id: &str,
     ) -> Result<AssetPack, BackgroundAssetsError> {
         let asset_pack_id = ffi::required_cstring(asset_pack_id, "asset_pack_id")?;
-        let (future, ctx) = AsyncCompletion::<OpaquePtr>::create();
+        let (future, ctx) = AsyncCompletion::<ffi::RetainedObject>::create();
         unsafe {
             ffi::ba_asset_pack_manager_asset_pack_async(
                 self.ptr,
                 asset_pack_id.as_ptr(),
                 ctx,
-                object_async_cb,
+                ffi::retained_object_async_cb,
             );
         };
         future
             .await
             .map_err(BackgroundAssetsError::from_json_str)
-            .and_then(|OpaquePtr(ptr)| {
-                AssetPack::from_raw(ptr).ok_or_else(|| {
+            .and_then(|asset_pack| {
+                AssetPack::from_raw(asset_pack.into_raw()).ok_or_else(|| {
                     BackgroundAssetsError::message("asset-pack pointer must not be null")
                 })
             })
@@ -803,23 +809,6 @@ impl TryFrom<DownloadStatusUpdatePayload> for DownloadStatusUpdate {
                 )))
             }
         })
-    }
-}
-
-#[cfg(feature = "async")]
-struct OpaquePtr(*mut c_void);
-#[cfg(feature = "async")]
-unsafe impl Send for OpaquePtr {}
-
-#[cfg(feature = "async")]
-unsafe extern "C" fn object_async_cb(result: *mut c_void, error: *const c_char, ctx: *mut c_void) {
-    if !error.is_null() {
-        let message = unsafe { error_from_cstr(error) };
-        unsafe { AsyncCompletion::<OpaquePtr>::complete_err(ctx, message) };
-    } else if !result.is_null() {
-        unsafe { AsyncCompletion::complete_ok(ctx, OpaquePtr(result)) };
-    } else {
-        unsafe { AsyncCompletion::<OpaquePtr>::complete_err(ctx, "missing object result".into()) };
     }
 }
 

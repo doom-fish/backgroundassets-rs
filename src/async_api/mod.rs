@@ -69,12 +69,6 @@ pub use crate::manager::{
     ManagedAssetPackDownloadEvent, ManagedAssetPackDownloadEventStream, UpdateCheck,
 };
 
-struct OpaquePtr(*mut c_void);
-
-// SAFETY: The pointer is an opaque retained Objective-C/Swift object or boxed
-// array handle that is never dereferenced directly in Rust.
-unsafe impl Send for OpaquePtr {}
-
 #[derive(Debug, Deserialize)]
 struct UpdateCheckPayload {
     #[serde(rename = "updatingIDs")]
@@ -105,15 +99,17 @@ fn parse_update_check_response(value: String) -> Result<UpdateCheck, BackgroundA
     })
 }
 
-fn asset_pack_from_raw(OpaquePtr(ptr): OpaquePtr) -> Result<AssetPack, BackgroundAssetsError> {
-    AssetPack::from_raw(ptr)
+fn asset_pack_from_raw(
+    asset_pack: ffi::RetainedObject,
+) -> Result<AssetPack, BackgroundAssetsError> {
+    AssetPack::from_raw(asset_pack.into_raw())
         .ok_or_else(|| BackgroundAssetsError::message("asset-pack pointer must not be null"))
 }
 
 fn poll_object_future<T>(
-    inner: &mut AsyncCompletionFuture<OpaquePtr>,
+    inner: &mut AsyncCompletionFuture<ffi::RetainedObject>,
     cx: &mut Context<'_>,
-    map_ok: fn(OpaquePtr) -> Result<T, BackgroundAssetsError>,
+    map_ok: fn(ffi::RetainedObject) -> Result<T, BackgroundAssetsError>,
 ) -> Poll<Result<T, BackgroundAssetsError>> {
     Pin::new(inner).poll(cx).map(|result| {
         result
@@ -137,17 +133,6 @@ where
     })
 }
 
-unsafe extern "C" fn object_async_cb(result: *mut c_void, error: *const c_char, ctx: *mut c_void) {
-    if !error.is_null() {
-        let message = unsafe { error_from_cstr(error) };
-        unsafe { AsyncCompletion::<OpaquePtr>::complete_err(ctx, message) };
-    } else if !result.is_null() {
-        unsafe { AsyncCompletion::<OpaquePtr>::complete_ok(ctx, OpaquePtr(result)) };
-    } else {
-        unsafe { AsyncCompletion::<OpaquePtr>::complete_err(ctx, "missing object result".into()) };
-    }
-}
-
 unsafe extern "C" fn string_async_cb(result: *mut c_void, error: *const c_char, ctx: *mut c_void) {
     if !error.is_null() {
         let message = unsafe { error_from_cstr(error) };
@@ -161,7 +146,7 @@ unsafe extern "C" fn string_async_cb(result: *mut c_void, error: *const c_char, 
 }
 
 pub struct AllAssetPacksFuture {
-    inner: AsyncCompletionFuture<OpaquePtr>,
+    inner: AsyncCompletionFuture<ffi::RetainedObject>,
 }
 
 impl fmt::Debug for AllAssetPacksFuture {
@@ -175,14 +160,14 @@ impl Future for AllAssetPacksFuture {
     type Output = Result<Vec<AssetPack>, BackgroundAssetsError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        poll_object_future(&mut self.inner, cx, |OpaquePtr(ptr)| {
-            Ok(collect_asset_packs(ptr))
+        poll_object_future(&mut self.inner, cx, |asset_packs| {
+            Ok(collect_asset_packs(asset_packs.into_raw()))
         })
     }
 }
 
 pub struct AssetPackFuture {
-    inner: AsyncCompletionFuture<OpaquePtr>,
+    inner: AsyncCompletionFuture<ffi::RetainedObject>,
 }
 
 impl fmt::Debug for AssetPackFuture {
@@ -281,7 +266,7 @@ impl Future for RemoveAssetPackFuture {
 }
 
 pub struct CurrentDownloadsFuture {
-    inner: AsyncCompletionFuture<OpaquePtr>,
+    inner: AsyncCompletionFuture<ffi::RetainedObject>,
 }
 
 impl fmt::Debug for CurrentDownloadsFuture {
@@ -295,8 +280,8 @@ impl Future for CurrentDownloadsFuture {
     type Output = Result<Vec<Download>, BackgroundAssetsError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        poll_object_future(&mut self.inner, cx, |OpaquePtr(ptr)| {
-            Ok(collect_downloads(ptr))
+        poll_object_future(&mut self.inner, cx, |downloads| {
+            Ok(collect_downloads(downloads.into_raw()))
         })
     }
 }
@@ -329,7 +314,7 @@ impl AsyncAssetPackManager {
             ffi::ba_asset_pack_manager_all_asset_packs_async(
                 self.inner.raw_ptr(),
                 ctx,
-                object_async_cb,
+                ffi::retained_object_async_cb,
             );
         }
         AllAssetPacksFuture { inner: future }
@@ -346,7 +331,7 @@ impl AsyncAssetPackManager {
                 self.inner.raw_ptr(),
                 asset_pack_id.as_ptr(),
                 ctx,
-                object_async_cb,
+                ffi::retained_object_async_cb,
             );
         }
         Ok(AssetPackFuture { inner: future })
@@ -480,7 +465,7 @@ impl AsyncDownloadManager {
             ffi::ba_download_manager_fetch_current_downloads_async(
                 self.inner.raw_ptr(),
                 ctx,
-                object_async_cb,
+                ffi::retained_object_async_cb,
             );
         }
         CurrentDownloadsFuture { inner: future }

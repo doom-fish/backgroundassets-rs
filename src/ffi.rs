@@ -1,5 +1,10 @@
 use core::ffi::{c_char, c_void};
 use std::ffi::{CStr, CString};
+#[cfg(feature = "async")]
+use std::mem::ManuallyDrop;
+
+#[cfg(feature = "async")]
+use doom_fish_utils::completion::{error_from_cstr, AsyncCompletion};
 
 use crate::error::BackgroundAssetsError;
 
@@ -240,4 +245,121 @@ pub fn required_cstring(
             "{field} contains an interior NUL byte: {error}"
         ))
     })
+}
+
+#[cfg(feature = "async")]
+pub struct RetainedObject {
+    ptr: *mut c_void,
+    release: unsafe extern "C" fn(*mut c_void),
+}
+
+#[cfg(feature = "async")]
+unsafe impl Send for RetainedObject {}
+
+#[cfg(feature = "async")]
+impl RetainedObject {
+    pub fn into_raw(self) -> *mut c_void {
+        ManuallyDrop::new(self).ptr
+    }
+}
+
+#[cfg(feature = "async")]
+impl Drop for RetainedObject {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { (self.release)(self.ptr) };
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+pub unsafe extern "C" fn retained_object_async_cb(
+    result: *mut c_void,
+    error: *const c_char,
+    ctx: *mut c_void,
+) {
+    let outcome = if !error.is_null() {
+        Err(unsafe { error_from_cstr(error) })
+    } else if result.is_null() {
+        Err("the bridge returned no object".to_owned())
+    } else {
+        Ok(RetainedObject {
+            ptr: result,
+            release: ba_object_release,
+        })
+    };
+    unsafe { AsyncCompletion::complete_with_result(ctx, outcome) };
+}
+
+#[cfg(all(test, feature = "async"))]
+mod tests {
+    use core::ffi::c_void;
+    use std::ffi::CString;
+    use std::ptr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use doom_fish_utils::completion::AsyncCompletion;
+
+    use super::{retained_object_async_cb, RetainedObject};
+
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn count_release(ptr: *mut c_void) {
+        drop(unsafe { Box::from_raw(ptr.cast::<u64>()) });
+        RELEASED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn object() -> RetainedObject {
+        RetainedObject {
+            ptr: Box::into_raw(Box::new(7_u64)).cast(),
+            release: count_release,
+        }
+    }
+
+    #[test]
+    fn retained_results_are_released_once_unless_taken() {
+        let before = RELEASED.load(Ordering::SeqCst);
+
+        drop(object());
+        assert_eq!(RELEASED.load(Ordering::SeqCst), before + 1);
+
+        let raw = object().into_raw();
+        assert_eq!(RELEASED.load(Ordering::SeqCst), before + 1);
+        unsafe { count_release(raw) };
+        assert_eq!(RELEASED.load(Ordering::SeqCst), before + 2);
+
+        let (future, ctx) = AsyncCompletion::<RetainedObject>::create();
+        drop(future);
+        unsafe { AsyncCompletion::complete_ok(ctx, object()) };
+        assert_eq!(RELEASED.load(Ordering::SeqCst), before + 3);
+
+        let (future, ctx) = AsyncCompletion::<RetainedObject>::create();
+        unsafe { AsyncCompletion::complete_ok(ctx, object()) };
+        drop(future);
+        assert_eq!(RELEASED.load(Ordering::SeqCst), before + 4);
+
+        let (future, ctx) = AsyncCompletion::<RetainedObject>::create();
+        unsafe { AsyncCompletion::complete_ok(ctx, object()) };
+        let taken = pollster::block_on(future).unwrap().into_raw();
+        assert_eq!(RELEASED.load(Ordering::SeqCst), before + 4);
+        unsafe { count_release(taken) };
+    }
+
+    #[test]
+    fn async_callback_reports_errors_and_missing_objects() {
+        let (future, ctx) = AsyncCompletion::<RetainedObject>::create();
+        let error = CString::new("{\"code\":7,\"domain\":\"Test\",\"message\":\"nope\"}").unwrap();
+        unsafe { retained_object_async_cb(ptr::null_mut(), error.as_ptr(), ctx) };
+        let Err(message) = pollster::block_on(future) else {
+            panic!("an error payload must complete with an error");
+        };
+        assert!(message.contains("nope"), "{message}");
+
+        let (future, ctx) = AsyncCompletion::<RetainedObject>::create();
+        unsafe { retained_object_async_cb(ptr::null_mut(), ptr::null(), ctx) };
+        let Err(message) = pollster::block_on(future) else {
+            panic!("a missing object must complete with an error");
+        };
+        assert!(message.contains("no object"), "{message}");
+    }
 }

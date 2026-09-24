@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authentication challenges and `AppExtensionInfo` snapshots never decoded the camelCase keys the bridge sends, so handlers saw empty challenges and the restricted download sizes were always `None`.
 - Progress with a non-finite fraction no longer drops the delegate event.
 - Package.swift now deploys to macOS 13.0, matching the README, and every newer API is guarded at runtime (13.3, 26.0, 26.4). It previously required macOS 26, which made the availability checks dead.
+- Async futures that returned retained bridge objects (asset packs, asset-pack arrays, current downloads) leaked those objects when the future was dropped before the framework answered, or completed and was never polled. The completion now owns them and releases them when the future is gone.
 - `build.rs` no longer adds the toolchain's `usr/lib/swift-5.5/macosx` directory to the rpath. It shadowed the SDK's concurrency library for the whole binary and broke linking alongside bridges that use newer concurrency APIs.
 
 ### Changed
