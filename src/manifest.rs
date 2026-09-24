@@ -53,14 +53,28 @@ impl Manifest {
         collect_asset_packs(unsafe { ffi::ba_manifest_asset_packs(self.ptr) })
     }
 
-    pub fn all_downloads(&self) -> Vec<Download> {
-        collect_downloads(unsafe { ffi::ba_manifest_all_downloads(self.ptr) })
+    pub fn all_downloads(&self) -> Result<Vec<Download>, BackgroundAssetsError> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let downloads = unsafe { ffi::ba_manifest_all_downloads(self.ptr, &raw mut error) };
+        if downloads.is_null() {
+            return Err(BackgroundAssetsError::from_owned_json_ptr(error));
+        }
+        Ok(collect_downloads(downloads))
     }
 
-    pub fn all_downloads_for_request(&self, request: ContentRequest) -> Vec<Download> {
-        collect_downloads(unsafe {
-            ffi::ba_manifest_all_downloads_for_request(self.ptr, request.as_raw())
-        })
+    pub fn all_downloads_for_request(
+        &self,
+        request: ContentRequest,
+    ) -> Result<Vec<Download>, BackgroundAssetsError> {
+        let request = request.as_raw()?;
+        let mut error: *mut c_char = ptr::null_mut();
+        let downloads = unsafe {
+            ffi::ba_manifest_all_downloads_for_request(self.ptr, request, &raw mut error)
+        };
+        if downloads.is_null() {
+            return Err(BackgroundAssetsError::from_owned_json_ptr(error));
+        }
+        Ok(collect_downloads(downloads))
     }
 }
 

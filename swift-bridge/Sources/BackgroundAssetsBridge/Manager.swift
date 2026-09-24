@@ -12,20 +12,27 @@ public func ba_asset_pack_manager_shared(
         writeErrorOut(errorOut, reason)
         return nil
     }
-    guard #available(macOS 26.0, *) else {
+    guard #available(macOS 26.0, *), let appGroupID = assetPackManagerAppGroupID else {
         writeErrorOut(errorOut, unavailableMessage)
         return nil
     }
-    return retained(ManagerBox(AssetPackManager.shared))
+    return retained(ManagerBox(AssetPackManager.shared, appGroupID: appGroupID))
 }
 
 @_cdecl("ba_asset_pack_manager_asset_pack_is_available_locally")
 public func ba_asset_pack_manager_asset_pack_is_available_locally(
     _ ptr: UnsafeMutableRawPointer?,
-    _ assetPackID: UnsafePointer<CChar>?
+    _ assetPackID: UnsafePointer<CChar>?,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
 ) -> Bool {
-    guard let ptr, let assetPackID else { return false }
-    guard #available(macOS 26.4, *) else { return false }
+    guard let ptr, let assetPackID else {
+        writeErrorOut(errorOut, "manager pointer and asset-pack identifier are required")
+        return false
+    }
+    guard #available(macOS 26.4, *) else {
+        writeErrorOut(errorOut, "AssetPackManager.assetPackIsAvailableLocally(withID:) requires macOS 26.4 or newer")
+        return false
+    }
     return manager(from: ptr).assetPackIsAvailableLocally(withID: String(cString: assetPackID))
 }
 
@@ -122,12 +129,16 @@ public func ba_asset_pack_manager_all_asset_packs_async(
     }
 
     if #available(macOS 26.0, *) {
-        let manager = manager(from: ptr)
+        let managerBox = borrowed(ptr, as: ManagerBox.self)
+        let manager = managerBox.value
+        let appGroupID = managerBox.appGroupID
         let callbackBox = AsyncCallbackBox(callback: cb, context: ctx)
         Task.detached {
             do {
                 let assetPacks = try await manager.allAssetPacks
-                callbackBox.succeed(retained(AssetPackArrayBox(sortedAssetPacks(assetPacks))))
+                callbackBox.succeed(
+                    retained(AssetPackArrayBox(sortedAssetPacks(assetPacks), appGroupID: appGroupID))
+                )
             } catch {
                 callbackBox.fail(error: error)
             }
@@ -151,13 +162,15 @@ public func ba_asset_pack_manager_asset_pack_async(
     }
 
     if #available(macOS 26.0, *) {
-        let manager = manager(from: ptr)
+        let managerBox = borrowed(ptr, as: ManagerBox.self)
+        let manager = managerBox.value
+        let appGroupID = managerBox.appGroupID
         let identifier = String(cString: assetPackID)
         let callbackBox = AsyncCallbackBox(callback: cb, context: ctx)
         Task.detached {
             do {
                 let assetPack = try await manager.assetPack(withID: identifier)
-                callbackBox.succeed(retained(AssetPackBox(assetPack)))
+                callbackBox.succeed(retained(AssetPackBox(assetPack, appGroupID: appGroupID)))
             } catch {
                 callbackBox.fail(error: error)
             }
@@ -241,8 +254,13 @@ public func ba_asset_pack_manager_ensure_local_availability_async(
         return
     }
 
+    let assetPackBox = borrowed(assetPackPtr, as: AssetPackBox.self)
+    if let rejection = appGroupMembershipRejection(assetPackBox.appGroupID) {
+        messageErrorString(rejection).withCString { cb(nil, $0, ctx) }
+        return
+    }
     let manager = manager(from: ptr)
-    let assetPack = assetPack(from: assetPackPtr)
+    let assetPack = assetPackBox.value
     let callbackBox = AsyncCallbackBox(callback: cb, context: ctx)
     Task.detached {
         do {

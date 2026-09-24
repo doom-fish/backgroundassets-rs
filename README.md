@@ -91,10 +91,11 @@ The macOS 27 additions (`AssetPackManager.manifest`, language resolution and loc
 Background Assets terminates a process that breaks some of its rules instead of reporting an error. The crate checks these rules first and returns a `BackgroundAssetsError`:
 
 - `DownloadManager::shared()` and `install_global_download_manager_delegate` need a bundle identifier. In the app (not in its extension) the `Info.plist` also needs a `BAInitialDownloadRestrictions` dictionary with a non-empty `BADownloadDomainAllowList` and `BADownloadAllowance` / `BAEssentialDownloadAllowance` numbers of 0 or more, plus an `https` `BAManifestURL`.
-- `AssetPackManager::shared()` and `install_global_managed_asset_pack_download_delegate` need a bundle identifier, a code signature with a team identifier, a `BAAppGroupID` string in the `Info.plist`, and that app group's user defaults. Plain `cargo run` and `cargo test` binaries meet none of these, so they get an error.
+- `AssetPackManager::shared()` and `install_global_managed_asset_pack_download_delegate` need a bundle identifier, a code signature with a team identifier, a `BAAppGroupID` string in the `Info.plist`, that app group's user defaults, and membership of that app group through the `com.apple.security.application-groups` entitlement. Plain `cargo run` and `cargo test` binaries meet none of these, so they get an error.
+- `AssetPack::download`, `AssetPack::download_for_request`, `Manifest::all_downloads`, `Manifest::all_downloads_for_request` and `ensure_local_availability` return an error when the process isn't a member of the asset pack's app group; the framework would otherwise raise an exception that can't be caught.
 - `UrlDownload` needs a file size between 1 and `isize::MAX`, a priority within `DownloadPriority::min()..=DownloadPriority::max()`, and an `https` URL. Exceptions the framework raises, for example for an app group the process doesn't belong to, become errors.
 - `schedule_download` and `start_foreground_download` reject essential downloads (call `removing_essential()` first) and refuse to run while the extension is answering `downloads(for:)`; return the downloads from the handler instead.
-- A download plan for a periodic content request can't contain essential downloads.
+- A download plan can contain essential downloads only for install and update content requests (`ContentRequest::allows_essential_downloads`). Request types the crate doesn't know arrive as `ContentRequest::Unknown` and allow none.
 
 ## Extension integration
 

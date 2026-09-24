@@ -20,12 +20,13 @@ public func ba_manifest_create_from_url(
         return nil
     }
 
+    let group = String(cString: appGroupID)
     do {
         let manifest = try AssetPackManifest(
             contentsOf: url,
-            appGroupID: String(cString: appGroupID)
+            appGroupID: group
         )
-        return retained(ManifestBox(manifest))
+        return retained(ManifestBox(manifest, appGroupID: group))
     } catch {
         writeErrorOut(errorOut, error)
         return nil
@@ -48,13 +49,14 @@ public func ba_manifest_create_from_data(
         return nil
     }
 
+    let group = String(cString: appGroupID)
     do {
         let data = Data(bytes: bytes, count: length)
         let manifest = try AssetPackManifest(
             from: data,
-            appGroupID: String(cString: appGroupID)
+            appGroupID: group
         )
-        return retained(ManifestBox(manifest))
+        return retained(ManifestBox(manifest, appGroupID: group))
     } catch {
         writeErrorOut(errorOut, error)
         return nil
@@ -70,25 +72,49 @@ public func ba_manifest_description(_ ptr: UnsafeMutableRawPointer?) -> UnsafeMu
 @_cdecl("ba_manifest_asset_packs")
 public func ba_manifest_asset_packs(_ ptr: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
     guard let ptr, #available(macOS 26.0, *) else { return nil }
-    let assetPacks = sortedAssetPacks(manifest(from: ptr).assetPacks)
-    return retained(AssetPackArrayBox(assetPacks))
+    let box = borrowed(ptr, as: ManifestBox.self)
+    return retained(AssetPackArrayBox(sortedAssetPacks(box.value.assetPacks), appGroupID: box.appGroupID))
+}
+
+@available(macOS 26.0, *)
+private func manifestDownloads(
+    _ ptr: UnsafeMutableRawPointer?,
+    for request: BAContentRequest?,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> UnsafeMutableRawPointer? {
+    guard let ptr else {
+        writeErrorOut(errorOut, "manifest pointer must not be null")
+        return nil
+    }
+    let box = borrowed(ptr, as: ManifestBox.self)
+    if let rejection = appGroupMembershipRejection(box.appGroupID) {
+        writeErrorOut(errorOut, rejection)
+        return nil
+    }
+    return retained(DownloadArrayBox(sortedDownloads(box.value.allDownloads(for: request))))
 }
 
 @_cdecl("ba_manifest_all_downloads")
-public func ba_manifest_all_downloads(_ ptr: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
-    guard let ptr, #available(macOS 26.0, *) else { return nil }
-    let downloads = sortedDownloads(manifest(from: ptr).allDownloads(for: nil))
-    return retained(DownloadArrayBox(downloads))
+public func ba_manifest_all_downloads(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> UnsafeMutableRawPointer? {
+    guard #available(macOS 26.0, *) else {
+        writeErrorOut(errorOut, unavailableMessage)
+        return nil
+    }
+    return manifestDownloads(ptr, for: nil, errorOut)
 }
 
 @_cdecl("ba_manifest_all_downloads_for_request")
 public func ba_manifest_all_downloads_for_request(
     _ ptr: UnsafeMutableRawPointer?,
-    _ request: Int
+    _ request: Int,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
 ) -> UnsafeMutableRawPointer? {
-    guard let ptr, #available(macOS 26.0, *) else { return nil }
-    let downloads = sortedDownloads(
-        manifest(from: ptr).allDownloads(for: BAContentRequest(rawValue: request))
-    )
-    return retained(DownloadArrayBox(downloads))
+    guard #available(macOS 26.0, *) else {
+        writeErrorOut(errorOut, unavailableMessage)
+        return nil
+    }
+    return manifestDownloads(ptr, for: BAContentRequest(rawValue: request), errorOut)
 }

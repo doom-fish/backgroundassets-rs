@@ -60,6 +60,35 @@ private func processTeamIdentifier() -> String? {
     return information[kSecCodeInfoTeamIdentifier as String] as? String
 }
 
+let processApplicationGroups: Set<String> = {
+    guard let task = SecTaskCreateFromSelf(nil),
+          let value = SecTaskCopyValueForEntitlement(
+              task,
+              "com.apple.security.application-groups" as CFString,
+              nil
+          )
+    else {
+        return []
+    }
+    return Set((value as? [String]) ?? [])
+}()
+
+func appGroupMembershipRejection(_ appGroupID: String) -> String? {
+    if processApplicationGroups.contains(appGroupID) {
+        return nil
+    }
+    return "the process isn't a member of the app group \(appGroupID); list it in the com.apple.security.application-groups entitlement"
+}
+
+let assetPackManagerAppGroupID: String? = {
+    guard let appGroupID = Bundle.main.object(forInfoDictionaryKey: "BAAppGroupID") as? String,
+          !appGroupID.isEmpty
+    else {
+        return nil
+    }
+    return appGroupID
+}()
+
 let assetPackManagerUnavailableReason: String? = {
     guard #available(macOS 26.0, *) else { return unavailableMessage }
     guard let bundleIdentifier = Bundle.main.bundleIdentifier, !bundleIdentifier.isEmpty else {
@@ -68,13 +97,14 @@ let assetPackManagerUnavailableReason: String? = {
     guard processTeamIdentifier() != nil else {
         return "AssetPackManager requires the process to be signed with a team identifier"
     }
-    guard let appGroupID = Bundle.main.object(forInfoDictionaryKey: "BAAppGroupID") as? String,
-          !appGroupID.isEmpty
-    else {
+    guard let appGroupID = assetPackManagerAppGroupID else {
         return "AssetPackManager requires a BAAppGroupID string in the main bundle's Info.plist"
     }
     guard UserDefaults(suiteName: appGroupID) != nil else {
         return "AssetPackManager requires the user defaults of the app group \(appGroupID)"
+    }
+    if let rejection = appGroupMembershipRejection(appGroupID) {
+        return "AssetPackManager can't use its BAAppGroupID: \(rejection)"
     }
     return nil
 }()
@@ -194,36 +224,44 @@ struct DownloadStatusUpdatePayload: Encodable {
 @available(macOS 26.0, *)
 final class AssetPackBox {
     let value: AssetPack
+    let appGroupID: String
 
-    init(_ value: AssetPack) {
+    init(_ value: AssetPack, appGroupID: String) {
         self.value = value
+        self.appGroupID = appGroupID
     }
 }
 
 @available(macOS 26.0, *)
 final class ManifestBox {
     let value: AssetPackManifest
+    let appGroupID: String
 
-    init(_ value: AssetPackManifest) {
+    init(_ value: AssetPackManifest, appGroupID: String) {
         self.value = value
+        self.appGroupID = appGroupID
     }
 }
 
 @available(macOS 26.0, *)
 final class ManagerBox {
     let value: AssetPackManager
+    let appGroupID: String
 
-    init(_ value: AssetPackManager) {
+    init(_ value: AssetPackManager, appGroupID: String) {
         self.value = value
+        self.appGroupID = appGroupID
     }
 }
 
 @available(macOS 26.0, *)
 final class AssetPackArrayBox {
     let value: [AssetPack]
+    let appGroupID: String
 
-    init(_ value: [AssetPack]) {
+    init(_ value: [AssetPack], appGroupID: String) {
         self.value = value
+        self.appGroupID = appGroupID
     }
 }
 

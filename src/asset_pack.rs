@@ -1,10 +1,12 @@
-use core::ffi::c_void;
+use core::ffi::{c_char, c_void};
 use std::fmt;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
+use std::ptr;
 
 use serde::Serialize;
 
 use crate::download::{ContentRequest, Download};
+use crate::error::BackgroundAssetsError;
 use crate::ffi;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -118,14 +120,23 @@ impl AssetPack {
         }
     }
 
-    pub fn download(&self) -> Option<Download> {
-        Download::from_raw(unsafe { ffi::ba_asset_pack_download(self.ptr) })
+    pub fn download(&self) -> Result<Download, BackgroundAssetsError> {
+        let mut error: *mut c_char = ptr::null_mut();
+        let download = unsafe { ffi::ba_asset_pack_download(self.ptr, &raw mut error) };
+        Download::from_raw(download)
+            .ok_or_else(|| BackgroundAssetsError::from_owned_json_ptr(error))
     }
 
-    pub fn download_for_request(&self, request: ContentRequest) -> Option<Download> {
-        Download::from_raw(unsafe {
-            ffi::ba_asset_pack_download_for_request(self.ptr, request.as_raw())
-        })
+    pub fn download_for_request(
+        &self,
+        request: ContentRequest,
+    ) -> Result<Download, BackgroundAssetsError> {
+        let request = request.as_raw()?;
+        let mut error: *mut c_char = ptr::null_mut();
+        let download =
+            unsafe { ffi::ba_asset_pack_download_for_request(self.ptr, request, &raw mut error) };
+        Download::from_raw(download)
+            .ok_or_else(|| BackgroundAssetsError::from_owned_json_ptr(error))
     }
 }
 

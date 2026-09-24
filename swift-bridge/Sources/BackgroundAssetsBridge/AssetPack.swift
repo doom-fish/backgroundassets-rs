@@ -42,19 +42,46 @@ public func ba_asset_pack_user_info_copy(
 }
 
 @_cdecl("ba_asset_pack_download")
-public func ba_asset_pack_download(_ ptr: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
-    guard let ptr, #available(macOS 26.0, *) else { return nil }
-    return retained(assetPack(from: ptr).download(for: nil))
+public func ba_asset_pack_download(
+    _ ptr: UnsafeMutableRawPointer?,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+) -> UnsafeMutableRawPointer? {
+    guard let ptr else {
+        writeErrorOut(errorOut, "asset-pack pointer must not be null")
+        return nil
+    }
+    guard #available(macOS 26.0, *) else {
+        writeErrorOut(errorOut, unavailableMessage)
+        return nil
+    }
+    let box = borrowed(ptr, as: AssetPackBox.self)
+    if let rejection = appGroupMembershipRejection(box.appGroupID) {
+        writeErrorOut(errorOut, rejection)
+        return nil
+    }
+    return retained(box.value.download(for: nil))
 }
 
 @_cdecl("ba_asset_pack_download_for_request")
 public func ba_asset_pack_download_for_request(
     _ ptr: UnsafeMutableRawPointer?,
-    _ request: Int
+    _ request: Int,
+    _ errorOut: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
 ) -> UnsafeMutableRawPointer? {
-    guard let ptr, #available(macOS 26.0, *) else { return nil }
-    let requestValue = BAContentRequest(rawValue: request)
-    return retained(assetPack(from: ptr).download(for: requestValue))
+    guard let ptr else {
+        writeErrorOut(errorOut, "asset-pack pointer must not be null")
+        return nil
+    }
+    guard #available(macOS 26.0, *) else {
+        writeErrorOut(errorOut, unavailableMessage)
+        return nil
+    }
+    let box = borrowed(ptr, as: AssetPackBox.self)
+    if let rejection = appGroupMembershipRejection(box.appGroupID) {
+        writeErrorOut(errorOut, rejection)
+        return nil
+    }
+    return retained(box.value.download(for: BAContentRequest(rawValue: request)))
 }
 
 @_cdecl("ba_asset_pack_array_len")
@@ -69,7 +96,7 @@ public func ba_asset_pack_array_get(
     _ index: Int
 ) -> UnsafeMutableRawPointer? {
     guard let ptr, #available(macOS 26.0, *) else { return nil }
-    let value = borrowed(ptr, as: AssetPackArrayBox.self).value
-    guard value.indices.contains(index) else { return nil }
-    return retained(AssetPackBox(value[index]))
+    let box = borrowed(ptr, as: AssetPackArrayBox.self)
+    guard box.value.indices.contains(index) else { return nil }
+    return retained(AssetPackBox(box.value[index], appGroupID: box.appGroupID))
 }

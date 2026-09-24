@@ -390,7 +390,7 @@ fn check_download_plan(
     request: ContentRequest,
     downloads: &[Download],
 ) -> Result<(), BackgroundAssetsError> {
-    if request == ContentRequest::Periodic && downloads.iter().any(Download::is_essential) {
+    if !request.allows_essential_downloads() && downloads.iter().any(Download::is_essential) {
         return Err(BackgroundAssetsError::invalid_argument(
             "essential downloads are only allowed for install and update content requests",
         ));
@@ -412,7 +412,7 @@ pub unsafe extern "C" fn ba_rust_extension_downloads_for_request(
 
     #[cfg(feature = "async")]
     {
-        let request = ContentRequest::from_raw(request).unwrap_or(ContentRequest::Install);
+        let request = ContentRequest::from_raw(request);
         let manifest_url = string_from_ptr(manifest_url);
         let Some(extension_info) =
             (unsafe { AppExtensionInfo::retained_from_borrowed(extension_info) })
@@ -639,6 +639,18 @@ mod async_tests {
     use crate::download::{ContentRequest, Download};
     use crate::error::BackgroundAssetsError;
     use crate::DownloaderExtensionHandler;
+
+    #[test]
+    fn plans_without_essential_downloads_pass_for_every_request() {
+        for request in [
+            ContentRequest::Install,
+            ContentRequest::Update,
+            ContentRequest::Periodic,
+            ContentRequest::Unknown(9),
+        ] {
+            assert!(super::check_download_plan(request, &[]).is_ok());
+        }
+    }
 
     struct Filter {
         calls: Arc<AtomicUsize>,

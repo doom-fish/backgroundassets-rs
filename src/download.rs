@@ -36,25 +36,33 @@ pub enum ContentRequest {
     Install,
     Update,
     Periodic,
+    Unknown(isize),
 }
 
 impl ContentRequest {
-    pub(crate) const fn as_raw(self) -> isize {
+    pub(crate) fn as_raw(self) -> Result<isize, BackgroundAssetsError> {
         match self {
-            Self::Install => 1,
-            Self::Update => 2,
-            Self::Periodic => 3,
+            Self::Install => Ok(1),
+            Self::Update => Ok(2),
+            Self::Periodic => Ok(3),
+            Self::Unknown(raw) => Err(BackgroundAssetsError::invalid_argument(format!(
+                "content request {raw} is not a request type this crate knows"
+            ))),
         }
     }
 
     #[cfg(feature = "async")]
-    pub(crate) const fn from_raw(value: isize) -> Option<Self> {
+    pub(crate) const fn from_raw(value: isize) -> Self {
         match value {
-            1 => Some(Self::Install),
-            2 => Some(Self::Update),
-            3 => Some(Self::Periodic),
-            _ => None,
+            1 => Self::Install,
+            2 => Self::Update,
+            3 => Self::Periodic,
+            other => Self::Unknown(other),
         }
+    }
+
+    pub const fn allows_essential_downloads(self) -> bool {
+        matches!(self, Self::Install | Self::Update)
     }
 }
 
@@ -996,13 +1004,33 @@ mod async_tests {
     use super::{
         ba_rust_download_manager_delegate_challenge_disposition,
         ba_rust_download_manager_delegate_did_begin, exclusive_control_callback,
-        exclusive_control_job, DownloadManagerDelegate, DownloadManagerDelegateContext,
-        DownloadManagerEvent, DownloadSnapshot,
+        exclusive_control_job, ContentRequest, DownloadManagerDelegate,
+        DownloadManagerDelegateContext, DownloadManagerEvent, DownloadSnapshot,
     };
     use crate::extension::{AuthenticationChallenge, ChallengeDisposition};
     use crate::handler::HandlerState;
 
     const DOWNLOAD_JSON: &str = r#"{"identifier":"download.one","uniqueIdentifier":"abc","status":2,"priority":0,"isEssential":false,"isURLDownload":true}"#;
+
+    #[test]
+    fn content_requests_keep_unknown_values_instead_of_guessing() {
+        assert_eq!(ContentRequest::from_raw(1), ContentRequest::Install);
+        assert_eq!(ContentRequest::from_raw(2), ContentRequest::Update);
+        assert_eq!(ContentRequest::from_raw(3), ContentRequest::Periodic);
+        assert_eq!(ContentRequest::from_raw(4), ContentRequest::Unknown(4));
+
+        assert_eq!(ContentRequest::Update.as_raw().unwrap(), 2);
+        let error = ContentRequest::Unknown(4).as_raw().unwrap_err();
+        assert!(
+            error.message_text().contains("content request 4"),
+            "{error}"
+        );
+
+        assert!(ContentRequest::Install.allows_essential_downloads());
+        assert!(ContentRequest::Update.allows_essential_downloads());
+        assert!(!ContentRequest::Periodic.allows_essential_downloads());
+        assert!(!ContentRequest::Unknown(4).allows_essential_downloads());
+    }
     const CHALLENGE_JSON: &str = r#"{"authenticationMethod":"NSURLAuthenticationMethodServerTrust","host":"example.com","previousFailureCount":2,"proposedCredentialHasPassword":true,"proposedCredentialUser":"user"}"#;
 
     #[test]

@@ -23,7 +23,7 @@ Audited against:
 
 | API family | Status | Notes |
 | --- | --- | --- |
-| `BAContentRequest` | ✅ implemented | Exposed as `ContentRequest`. |
+| `BAContentRequest` | ✅ implemented | Exposed as `ContentRequest`; values the crate doesn't know arrive as `ContentRequest::Unknown`. |
 | `BADownload.State` | ✅ implemented | Exposed as `DownloadStatus`. |
 | `BADownload.Priority` + min/default/max | ✅ implemented | Exposed as `DownloadPriority`. |
 | `BADownload` | ✅ implemented | Metadata, essentiality, and `removing_essential`. |

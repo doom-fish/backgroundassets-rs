@@ -38,8 +38,12 @@ extern "C" {
     pub fn ba_asset_pack_version(ptr: *mut c_void) -> isize;
     pub fn ba_asset_pack_description(ptr: *mut c_void) -> *mut c_char;
     pub fn ba_asset_pack_user_info_copy(ptr: *mut c_void, length_out: *mut isize) -> *mut c_void;
-    pub fn ba_asset_pack_download(ptr: *mut c_void) -> *mut c_void;
-    pub fn ba_asset_pack_download_for_request(ptr: *mut c_void, request: isize) -> *mut c_void;
+    pub fn ba_asset_pack_download(ptr: *mut c_void, error_out: *mut *mut c_char) -> *mut c_void;
+    pub fn ba_asset_pack_download_for_request(
+        ptr: *mut c_void,
+        request: isize,
+        error_out: *mut *mut c_char,
+    ) -> *mut c_void;
     pub fn ba_asset_pack_array_len(ptr: *mut c_void) -> isize;
     pub fn ba_asset_pack_array_get(ptr: *mut c_void, index: isize) -> *mut c_void;
 
@@ -56,8 +60,12 @@ extern "C" {
     ) -> *mut c_void;
     pub fn ba_manifest_description(ptr: *mut c_void) -> *mut c_char;
     pub fn ba_manifest_asset_packs(ptr: *mut c_void) -> *mut c_void;
-    pub fn ba_manifest_all_downloads(ptr: *mut c_void) -> *mut c_void;
-    pub fn ba_manifest_all_downloads_for_request(ptr: *mut c_void, request: isize) -> *mut c_void;
+    pub fn ba_manifest_all_downloads(ptr: *mut c_void, error_out: *mut *mut c_char) -> *mut c_void;
+    pub fn ba_manifest_all_downloads_for_request(
+        ptr: *mut c_void,
+        request: isize,
+        error_out: *mut *mut c_char,
+    ) -> *mut c_void;
 
     pub fn ba_download_identifier(ptr: *mut c_void) -> *mut c_char;
     pub fn ba_download_unique_identifier(ptr: *mut c_void) -> *mut c_char;
@@ -126,6 +134,7 @@ extern "C" {
     pub fn ba_asset_pack_manager_asset_pack_is_available_locally(
         ptr: *mut c_void,
         asset_pack_id: *const c_char,
+        error_out: *mut *mut c_char,
     ) -> bool;
     pub fn ba_asset_pack_manager_contents(
         ptr: *mut c_void,

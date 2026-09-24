@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Progress with a non-finite fraction no longer drops the delegate event.
 - Package.swift now deploys to macOS 13.0, matching the README, and every newer API is guarded at runtime (13.3, 26.0, 26.4). It previously required macOS 26, which made the availability checks dead.
 - Async futures that returned retained bridge objects (asset packs, asset-pack arrays, current downloads) leaked those objects when the future was dropped before the framework answered, or completed and was never polled. The completion now owns them and releases them when the future is gone.
+- Creating a download for an app group the process isn't a member of raises inside the framework's Swift code, where it can't be caught. `AssetPack::download`, `AssetPack::download_for_request`, `Manifest::all_downloads`, `Manifest::all_downloads_for_request` and `ensure_local_availability` now check the process's `com.apple.security.application-groups` entitlement first and return an error, and `AssetPackManager::shared()` requires membership of its `BAAppGroupID` app group.
+- An unknown content request from the framework was treated as an install request, so essential downloads in its plan passed the check and the framework terminated the process. It's now `ContentRequest::Unknown`, which allows no essential downloads.
 - `build.rs` no longer adds the toolchain's `usr/lib/swift-5.5/macosx` directory to the rpath. It shadowed the SDK's concurrency library for the whole binary and broke linking alongside bridges that use newer concurrency APIs.
 
 ### Changed
@@ -37,12 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `install_global_managed_downloader_extension(handler, capacity)` takes a `ManagedDownloaderExtensionHandler` and returns an `ExtensionEventStream`.
 - **Breaking:** dropping the stream returned by `install_global_downloader_extension` or `install_global_managed_downloader_extension` unregisters the handler; both functions are `#[must_use]`.
 - **Breaking:** `DownloaderExtensionHandler::should_download_asset_pack` moved to `ManagedDownloaderExtensionHandler`; the standard extension never called it.
+- **Breaking:** `AssetPack::download` and `AssetPack::download_for_request` return `Result<Download, BackgroundAssetsError>` instead of `Option<Download>`, and `Manifest::all_downloads` and `Manifest::all_downloads_for_request` return `Result<Vec<Download>, BackgroundAssetsError>` instead of an always-present `Vec`.
+- **Breaking:** `ContentRequest` has an `Unknown(isize)` variant for request types the crate doesn't know; `download_for_request` and `all_downloads_for_request` reject it.
+- **Breaking:** `AssetPackManager::descriptor` returns an `OwnedFd` that closes the descriptor on drop, instead of a raw `i32` the caller had to close.
+- **Breaking:** `AssetPackManager::asset_pack_is_available_locally` returns `Result<bool, BackgroundAssetsError>`; it returned `false` for an identifier with a NUL byte and on macOS before 26.4.
+- **Breaking:** `AssetPackManager::shared()` returns an error when the process isn't a member of the app group named by `BAAppGroupID`.
 - The doom-fish-utils requirement is now `>=0.4.1, <0.5`, and `rust-version` is 1.82.
 
 ### Added
 
 - `ManagedDownloaderExtensionHandler` trait with `should_download_asset_pack` and `did_receive_challenge`.
 - `ExclusiveControlFuture<R>`, re-exported at the crate root and from `async_api`.
+- `ContentRequest::allows_essential_downloads`.
 - Tests that call the Swift bridge (manager preconditions, `UrlDownload` validation and exception handling, manifest errors, delegate installation failure) and tests that drive the delegate, stream, extension and exclusive-control callbacks through their real contexts.
 
 ### Removed

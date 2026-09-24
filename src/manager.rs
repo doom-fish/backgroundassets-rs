@@ -1,5 +1,6 @@
 use core::ffi::{c_char, c_void};
 use std::fmt;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::ptr;
 
 #[cfg(feature = "async")]
@@ -103,13 +104,23 @@ impl AssetPackManager {
         self.ptr
     }
 
-    pub fn asset_pack_is_available_locally(&self, asset_pack_id: &str) -> bool {
-        ffi::required_cstring(asset_pack_id, "asset_pack_id").is_ok_and(|asset_pack_id| unsafe {
+    pub fn asset_pack_is_available_locally(
+        &self,
+        asset_pack_id: &str,
+    ) -> Result<bool, BackgroundAssetsError> {
+        let asset_pack_id = ffi::required_cstring(asset_pack_id, "asset_pack_id")?;
+        let mut error: *mut c_char = ptr::null_mut();
+        let available = unsafe {
             ffi::ba_asset_pack_manager_asset_pack_is_available_locally(
                 self.ptr,
                 asset_pack_id.as_ptr(),
+                &raw mut error,
             )
-        })
+        };
+        if !error.is_null() {
+            return Err(BackgroundAssetsError::from_owned_json_ptr(error));
+        }
+        Ok(available)
     }
 
     pub fn contents(
@@ -144,7 +155,7 @@ impl AssetPackManager {
         &self,
         path: &str,
         asset_pack_id: Option<&str>,
-    ) -> Result<i32, BackgroundAssetsError> {
+    ) -> Result<OwnedFd, BackgroundAssetsError> {
         let path = ffi::required_cstring(path, "path")?;
         let asset_pack_id_cstr = asset_pack_id
             .map(|value| ffi::required_cstring(value, "asset_pack_id"))
@@ -163,7 +174,12 @@ impl AssetPackManager {
         if !error.is_null() {
             return Err(BackgroundAssetsError::from_owned_json_ptr(error));
         }
-        Ok(descriptor)
+        if descriptor < 0 {
+            return Err(BackgroundAssetsError::message(
+                "descriptor(for:) returned no file descriptor",
+            ));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
     }
 
     pub fn url(&self, path: &str) -> Result<String, BackgroundAssetsError> {
