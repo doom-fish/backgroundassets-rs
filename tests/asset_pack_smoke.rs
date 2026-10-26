@@ -10,7 +10,7 @@ fn asset_pack_smoke() -> Result<(), Box<dyn std::error::Error>> {
         let packs = manager.all_asset_packs().await?;
         for pack in packs {
             let snapshot = pack.snapshot();
-            assert!(!snapshot.id.is_empty());
+            assert_ne!(snapshot.id, "");
             assert_eq!(snapshot.id, pack.id());
             manager.status_relative_to(&pack).await?;
         }

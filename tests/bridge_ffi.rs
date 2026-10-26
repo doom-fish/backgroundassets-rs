@@ -83,21 +83,21 @@ fn url_download_turns_framework_exceptions_into_errors() {
         error.domain() == "BackgroundAssetsObjCBridge" || error.message_text().contains("13.3"),
         "{error}"
     );
-    assert!(!error.message_text().is_empty());
+    assert_ne!(error.message_text(), "");
 }
 
 #[test]
 fn manifest_from_bytes_returns_the_framework_error() {
     let error = Manifest::from_bytes(b"{}", GROUP).unwrap_err();
-    assert!(!error.message_text().is_empty());
-    assert!(!error.domain().is_empty());
+    assert_ne!(error.message_text(), "");
+    assert_ne!(error.domain(), "");
 }
 
 #[test]
 fn manifest_from_url_reports_a_missing_file() {
     let error =
         Manifest::from_url("/nonexistent/backgroundassets/manifest.json", GROUP).unwrap_err();
-    assert!(!error.message_text().is_empty());
+    assert_ne!(error.message_text(), "");
 }
 
 #[test]
